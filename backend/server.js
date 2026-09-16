@@ -250,7 +250,15 @@ Encontre até 8 anúncios e responda APENAS com um bloco JSON (sem texto antes o
       messages: [{ role: "user", content: prompt }],
     });
 
-    const textoCompleto = message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+        const textoCompleto = message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+
+    console.log('=== DIAGNOSTICO BUSCA ===');
+    console.log('stop_reason:', message.stop_reason);
+    console.log('tipos de bloco:', message.content.map(b => b.type).join(', '));
+    console.log('tamanho do texto:', textoCompleto.length);
+    console.log('resposta bruta:', textoCompleto.slice(0, 2000));
+    console.log('=========================');
+
     const resposta = extrairJSON(textoCompleto);
 
     const anuncios = (resposta.anuncios || []).map((a) => ({
