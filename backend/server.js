@@ -32,6 +32,22 @@ function extrairJSON(textoCompleto) {
   return JSON.parse(jsonMatch[0]);
 }
 
+// Detecta se a URL aponta para um anúncio específico ou só para uma página de listagem
+function ehLinkDeAnuncio(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const caminho = new URL(url).pathname;
+    const segmentos = caminho.split('/').filter(Boolean);
+    const temIdLongo = /\d{6,}/.test(caminho);
+    const temSlugDetalhado = segmentos.some((s) => s.length > 25);
+    return temIdLongo || temSlugDetalhado || segmentos.length >= 5;
+  } catch {
+    return false;
+  }
+}
+
+// ============ CARTEIRA DE IMÓVEIS (cadastro manual do corretor) ============
+
 app.get('/api/imoveis', async (req, res) => {
   try {
     const { bairro, tipo, preco_min, preco_max } = req.query;
@@ -102,6 +118,8 @@ app.get('/api/imoveis/:id/analise', async (req, res) => {
   } catch (error) { res.status(500).json({ erro: error.message }); }
 });
 
+// ============ FUNÇÃO COMPARTILHADA DE ANÁLISE ============
+
 async function analisarPreco(im) {
   const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
 
@@ -146,6 +164,7 @@ Ao final, responda APENAS com um bloco JSON (sem texto antes ou depois, sem mark
   return extrairJSON(textoCompleto);
 }
 
+// Análise avulsa: recebe os dados direto no corpo, sem precisar estar salvo no banco
 app.post('/api/analisar-avulso', async (req, res) => {
   try {
     const { titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao } = req.body;
@@ -154,6 +173,8 @@ app.post('/api/analisar-avulso', async (req, res) => {
     res.json(resposta);
   } catch (error) { console.error('Erro na análise avulsa:', error); res.status(500).json({ erro: error.message }); }
 });
+
+// ============ BUSCA DE ANÚNCIOS REAIS NA WEB ============
 
 app.post('/api/buscar-anuncios', async (req, res) => {
   try {
@@ -177,20 +198,28 @@ app.post('/api/buscar-anuncios', async (req, res) => {
 
     const prompt = `Você é um assistente especializado em buscar imóveis à venda no Brasil. Hoje é ${hoje}.
 
-Pesquise na web anúncios REAIS e ATIVOS (não expirados, não removidos) de imóveis à venda em portais confiáveis como OLX, Viva Real, Zap Imóveis, Imovelweb e QuintoAndar, que combinem com estes critérios:
+Encontre anúncios REAIS e ATIVOS de imóveis à venda em portais como OLX, Viva Real, Zap Imóveis, Imovelweb, DF Imóveis, MGF Imóveis e QuintoAndar, que combinem com estes critérios:
 
 ${criterios}
 
-Instruções importantes:
-- Priorize anúncios que atendam ao MÁXIMO de critérios informados. Se não houver correspondência exata, inclua os mais próximos, mas nunca invente características que não constam no anúncio original.
-- Extraia os dados diretamente do anúncio real encontrado na pesquisa. Não estime, não arredonde e não crie valores fictícios.
-- O campo "link" deve ser a URL direta da página do anúncio específico, nunca a home do site ou uma página de busca genérica.
-- Não repita o mesmo imóvel mais de uma vez, mesmo que apareça em mais de um site.
-- Se o anúncio mencionar EXPLICITAMENTE aceitar parceria/comissão com outros corretores, marque "aceita_parceria" como true. Se mencionar EXPLICITAMENTE que não aceita, marque false. Se não houver nenhuma menção sobre isso, marque null (não deduza).
-- Ordene os resultados do mais barato para o mais caro.
-- Se não encontrar nenhum anúncio real correspondente, retorne a lista vazia. Nunca invente anúncios fictícios para preencher a lista.
+Método obrigatório de trabalho:
+1. Use web_search para localizar as páginas de resultado dos portais que atendam aos critérios.
+2. Use web_fetch para ABRIR essas páginas de listagem e extrair de dentro delas os anúncios individuais, com a URL específica de cada imóvel, o preço e as características reais.
+3. Se útil, use web_fetch novamente na página do anúncio individual para confirmar preço, características e telefone de contato.
 
-Encontre até 8 anúncios reais e retorne APENAS um bloco JSON (sem texto antes ou depois, sem markdown) neste formato exato:
+Regras rígidas sobre o campo "link":
+- Deve ser a URL da PÁGINA DO ANÚNCIO ESPECÍFICO daquele imóvel, com identificador ou slug próprio do imóvel.
+- NUNCA use a URL de uma página de busca, listagem, categoria ou home do portal. Exemplos do que é PROIBIDO: /venda/df/brasilia/apartamento, /imoveis/venda, qualquer URL com parâmetros de filtro.
+- Se você não conseguir obter a URL do anúncio individual, coloque "link": null. Não preencha com a página de listagem.
+
+Demais regras:
+- Extraia os dados do anúncio real. Não estime, não arredonde, não invente valores.
+- Não repita o mesmo imóvel mais de uma vez.
+- Marque "aceita_parceria" como true apenas se o anúncio disser explicitamente que aceita parceria ou comissão com corretores. Marque false apenas se disser explicitamente que não aceita. Caso contrário, null.
+- Ordene do mais barato para o mais caro.
+- Se não encontrar nenhum anúncio real correspondente, retorne a lista vazia. Nunca invente anúncios.
+
+Encontre até 8 anúncios e responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
 {
   "anuncios": [
     {
@@ -203,9 +232,9 @@ Encontre até 8 anúncios reais e retorne APENAS um bloco JSON (sem texto antes 
       "banheiros": número ou null,
       "vagas": número ou null,
       "area_m2": número ou null,
-      "link": "URL real e direta do anúncio",
+      "link": "URL direta do anúncio individual, ou null",
       "site_origem": "nome do site",
-      "telefone": "telefone se disponível no anúncio, senão null",
+      "telefone": "telefone se disponível, senão null",
       "aceita_parceria": true, false, ou null
     }
   ]
@@ -213,14 +242,24 @@ Encontre até 8 anúncios reais e retorne APENAS um bloco JSON (sem texto antes 
 
     const message = await client.messages.create({
       model: "claude-sonnet-5",
-      max_tokens: 3000,
-      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 6 }],
+      max_tokens: 4000,
+      tools: [
+        { type: "web_search_20250305", name: "web_search", max_uses: 6 },
+        { type: "web_fetch_20250910", name: "web_fetch", max_uses: 8 },
+      ],
       messages: [{ role: "user", content: prompt }],
     });
 
     const textoCompleto = message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
     const resposta = extrairJSON(textoCompleto);
-    res.json(resposta);
+
+    const anuncios = (resposta.anuncios || []).map((a) => ({
+      ...a,
+      link_direto: ehLinkDeAnuncio(a.link),
+      link: ehLinkDeAnuncio(a.link) ? a.link : null,
+    }));
+
+    res.json({ anuncios });
   } catch (error) { console.error('Erro ao buscar anúncios:', error); res.status(500).json({ erro: error.message }); }
 });
 
