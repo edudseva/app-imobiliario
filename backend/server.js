@@ -91,7 +91,8 @@ Responda APENAS com o JSON.`;
       max_tokens: 400,
       messages: [{ role: "user", content: prompt }],
     });
-    const resposta = JSON.parse(message.content[0].text);
+    const textoLimpo = message.content[0].text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+const resposta = JSON.parse(textoLimpo);
     await pool.query(`INSERT INTO analises_ia (imovel_id, resumo, score, preco_sugestao) VALUES (?, ?, ?, ?)`,
       [req.params.id, resposta.resumo, resposta.score, resposta.preco_sugestao]);
     res.json(resposta);
