@@ -65,9 +65,9 @@ function App() {
   const [salvando, setSalvando] = useState(false);
   const [mostrarFormCarteira, setMostrarFormCarteira] = useState(false);
 
-  const aviso = (texto, tipo = 'info') => {
+    const aviso = (texto, tipo = 'info') => {
     setMensagem({ texto, tipo });
-    setTimeout(() => setMensagem(null), 5000);
+    if (tipo !== 'erro') setTimeout(() => setMensagem(null), 5000);
   };
 
   const buscarAnuncios = async (e) => {
