@@ -17,7 +17,7 @@ const pool = mysql.createPool({
   connectionLimit: 10,
 });
 
-const client = new Anthropic();
+const client = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
 app.use(cors());
 app.use(express.json());
