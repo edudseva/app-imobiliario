@@ -4,167 +4,619 @@ import './App.css';
 
 const API_BASE = 'https://app-imobiliario-production.up.railway.app/api';
 
-function App() {
-  const [imoveis, setImoveis] = useState([]);
-  const [filtro, setFiltro] = useState({ bairro: '', tipo: '', preco_min: '', preco_max: '' });
-  const [formulario, setFormulario] = useState({
-    titulo: '', preco: '', bairro: '', tipo: 'apartamento',
-    quartos: 2, banheiros: 1, area_m2: '', descricao: '',
-    contato_telefone: '', contato_email: '',
+const formatarPreco = (valor) => {
+  if (valor === null || valor === undefined || valor === '') return 'Preço não informado';
+  return Number(valor).toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
   });
-  const [imovelSelecionado, setImovelSelecionado] = useState(null);
-  const [analise, setAnalise] = useState(null);
-  const [carregando, setCarregando] = useState(false);
-  const [mensagem, setMensagem] = useState('');
-  const [aba, setAba] = useState('lista');
+};
 
-  const buscarImoveis = async () => {
-    try {
-      const params = Object.fromEntries(Object.entries(filtro).filter(([, v]) => v !== ''));
-      const res = await axios.get(`${API_BASE}/imoveis`, { params });
-      setImoveis(res.data || []);
-    } catch (error) { setMensagem(`Erro ao buscar: ${error.message}`); }
+const montarLinkWhatsApp = (telefone, titulo) => {
+  if (!telefone) return null;
+  let numero = String(telefone).replace(/\D/g, '');
+  if (numero.length < 10) return null;
+  if (!numero.startsWith('55')) numero = '55' + numero;
+  const msg = `Olá, vi o anúncio do imóvel "${titulo}". Ainda está disponível? Vocês trabalham com parceria entre corretores?`;
+  return `https://wa.me/${numero}?text=${encodeURIComponent(msg)}`;
+};
+
+const FORM_BUSCA_INICIAL = {
+  cidade: '',
+  bairro: '',
+  tipo: '',
+  preco_min: '',
+  preco_max: '',
+  quartos_min: '',
+  banheiros_min: '',
+  vagas_min: '',
+  area_min: '',
+  area_max: '',
+  detalhes: '',
+};
+
+const FORM_CARTEIRA_INICIAL = {
+  titulo: '',
+  preco: '',
+  bairro: '',
+  tipo: 'apartamento',
+  quartos: '',
+  banheiros: '',
+  area_m2: '',
+  descricao: '',
+  contato_telefone: '',
+  contato_email: '',
+};
+
+function App() {
+  const [aba, setAba] = useState('buscar');
+  const [mensagem, setMensagem] = useState(null);
+
+  const [formBusca, setFormBusca] = useState(FORM_BUSCA_INICIAL);
+  const [buscando, setBuscando] = useState(false);
+  const [resultados, setResultados] = useState(null);
+  const [analises, setAnalises] = useState({});
+  const [analisando, setAnalisando] = useState({});
+
+  const [carteira, setCarteira] = useState([]);
+  const [formCarteira, setFormCarteira] = useState(FORM_CARTEIRA_INICIAL);
+  const [salvando, setSalvando] = useState(false);
+  const [mostrarFormCarteira, setMostrarFormCarteira] = useState(false);
+
+  const aviso = (texto, tipo = 'info') => {
+    setMensagem({ texto, tipo });
+    setTimeout(() => setMensagem(null), 5000);
   };
 
-  const adicionarImovel = async (e) => {
+  const buscarAnuncios = async (e) => {
     e.preventDefault();
+    if (!formBusca.bairro.trim()) {
+      aviso('Informe pelo menos o bairro para buscar', 'erro');
+      return;
+    }
+    setBuscando(true);
+    setResultados(null);
+    setAnalises({});
     try {
-      await axios.post(`${API_BASE}/imoveis`, formulario);
-      setMensagem('✅ Imóvel adicionado com sucesso!');
-      setFormulario({ titulo: '', preco: '', bairro: '', tipo: 'apartamento', quartos: 2, banheiros: 1, area_m2: '', descricao: '', contato_telefone: '', contato_email: '' });
-      await buscarImoveis();
-      setTimeout(() => setAba('lista'), 1500);
-    } catch (error) { setMensagem(`❌ Erro: ${error.response?.data?.erro || error.message}`); }
-  };
-
-  const analisarComIA = async (id) => {
-    setCarregando(true);
-    try {
-      const res = await axios.post(`${API_BASE}/imoveis/${id}/analisar`);
-      setAnalise(res.data);
-    } catch (error) { setMensagem(`❌ Erro na análise: ${error.message}`); }
-    finally { setCarregando(false); }
-  };
-
-  const deletar = async (id) => {
-    if (window.confirm('Tem certeza?')) {
-      try {
-        await axios.delete(`${API_BASE}/imoveis/${id}`);
-        setMensagem('✅ Imóvel deletado');
-        await buscarImoveis();
-      } catch (error) { setMensagem(`❌ Erro ao deletar: ${error.message}`); }
+      const payload = Object.fromEntries(
+        Object.entries(formBusca).filter(([, v]) => String(v).trim() !== '')
+      );
+      const res = await axios.post(`${API_BASE}/buscar-anuncios`, payload);
+      setResultados(res.data.anuncios || []);
+    } catch (error) {
+      aviso(error.response?.data?.erro || 'Não foi possível concluir a busca agora', 'erro');
+      setResultados([]);
+    } finally {
+      setBuscando(false);
     }
   };
 
-  useEffect(() => { buscarImoveis(); }, []);
+  const analisarAnuncio = async (anuncio, indice) => {
+    setAnalisando((a) => ({ ...a, [indice]: true }));
+    try {
+      const res = await axios.post(`${API_BASE}/analisar-avulso`, {
+        titulo: anuncio.titulo,
+        preco: anuncio.preco,
+        bairro: anuncio.bairro,
+        tipo: anuncio.tipo,
+        quartos: anuncio.quartos,
+        banheiros: anuncio.banheiros,
+        area_m2: anuncio.area_m2,
+        descricao: `${anuncio.tipo || ''} em ${anuncio.bairro || ''}${anuncio.cidade ? ', ' + anuncio.cidade : ''}`,
+      });
+      setAnalises((a) => ({ ...a, [indice]: res.data }));
+    } catch (error) {
+      aviso(error.response?.data?.erro || 'Não foi possível analisar este imóvel', 'erro');
+    } finally {
+      setAnalisando((a) => ({ ...a, [indice]: false }));
+    }
+  };
+
+  const carregarCarteira = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/imoveis`);
+      setCarteira(res.data || []);
+    } catch (error) {
+      aviso('Não foi possível carregar sua carteira', 'erro');
+    }
+  };
+
+  const salvarNaCarteira = async (e) => {
+    e.preventDefault();
+    setSalvando(true);
+    try {
+      await axios.post(`${API_BASE}/imoveis`, formCarteira);
+      setFormCarteira(FORM_CARTEIRA_INICIAL);
+      setMostrarFormCarteira(false);
+      aviso('Imóvel adicionado à carteira', 'sucesso');
+      await carregarCarteira();
+    } catch (error) {
+      aviso(error.response?.data?.erro || 'Não foi possível salvar', 'erro');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  const removerDaCarteira = async (id) => {
+    if (!window.confirm('Remover este imóvel da carteira?')) return;
+    try {
+      await axios.delete(`${API_BASE}/imoveis/${id}`);
+      aviso('Imóvel removido', 'sucesso');
+      await carregarCarteira();
+    } catch (error) {
+      aviso('Não foi possível remover', 'erro');
+    }
+  };
+
+  const analisarDaCarteira = async (id) => {
+    setAnalisando((a) => ({ ...a, [`c${id}`]: true }));
+    try {
+      const res = await axios.post(`${API_BASE}/imoveis/${id}/analisar`);
+      setAnalises((a) => ({ ...a, [`c${id}`]: res.data }));
+    } catch (error) {
+      aviso(error.response?.data?.erro || 'Não foi possível analisar', 'erro');
+    } finally {
+      setAnalisando((a) => ({ ...a, [`c${id}`]: false }));
+    }
+  };
+
+  useEffect(() => {
+    if (aba === 'carteira') carregarCarteira();
+  }, [aba]);
+
+  const BlocoAnalise = ({ dados }) => (
+    <div className="analise">
+      <div className="analise-topo">
+        <span className={`tag tag-${String(dados.parecer || '').toLowerCase()}`}>{dados.parecer}</span>
+        <span className="analise-score">{dados.score}/100</span>
+      </div>
+      <div className="barra">
+        <div className="barra-fill" style={{ width: `${dados.score || 0}%` }} />
+      </div>
+      <p className="analise-resumo">{dados.resumo}</p>
+      <div className="analise-linhas">
+        {dados.preco_sugestao ? (
+          <span>Sugerido: <strong>{formatarPreco(dados.preco_sugestao)}</strong></span>
+        ) : null}
+        {dados.tempo_venda ? <span>Giro estimado: <strong>{dados.tempo_venda}</strong></span> : null}
+      </div>
+    </div>
+  );
 
   return (
-    <div className="App">
-      <header className="header">
-        <h1>🏠 Agregador Imobiliário</h1>
-        <p>Com análise de IA</p>
+    <div className="app">
+      <header className="topo">
+        <div className="topo-inner">
+          <div className="marca">
+            <span className="marca-icone">🏙️</span>
+            <div>
+              <h1>Radar Imobiliário</h1>
+              <p>Encontre imóveis em vários portais e já abra a conversa de parceria</p>
+            </div>
+          </div>
+          <nav className="abas">
+            <button className={aba === 'buscar' ? 'ativa' : ''} onClick={() => setAba('buscar')}>
+              Buscar imóveis
+            </button>
+            <button className={aba === 'carteira' ? 'ativa' : ''} onClick={() => setAba('carteira')}>
+              Minha carteira
+            </button>
+          </nav>
+        </div>
       </header>
 
-      {mensagem && <div className={`mensagem ${mensagem.includes('✅') ? 'sucesso' : 'erro'}`}>{mensagem}</div>}
+      {mensagem ? <div className={`alerta alerta-${mensagem.tipo}`}>{mensagem.texto}</div> : null}
 
-      <nav className="abas">
-        <button className={`aba ${aba === 'lista' ? 'ativa' : ''}`} onClick={() => setAba('lista')}>📋 Listar</button>
-        <button className={`aba ${aba === 'adicionar' ? 'ativa' : ''}`} onClick={() => setAba('adicionar')}>➕ Adicionar</button>
-        <button className={`aba ${aba === 'buscar' ? 'ativa' : ''}`} onClick={() => setAba('buscar')}>🔍 Filtrar</button>
-      </nav>
-
-      <div className="container">
-        {aba === 'adicionar' && (
-          <section className="secao">
-            <h2>Adicionar Novo Imóvel</h2>
-            <form onSubmit={adicionarImovel} className="formulario">
-              <div className="form-row">
-                <input type="text" placeholder="Título do anúncio" value={formulario.titulo} onChange={(e) => setFormulario({ ...formulario, titulo: e.target.value })} required />
-                <input type="number" placeholder="Preço (R$)" value={formulario.preco} onChange={(e) => setFormulario({ ...formulario, preco: e.target.value })} required />
-              </div>
-              <div className="form-row">
-                <input type="text" placeholder="Bairro" value={formulario.bairro} onChange={(e) => setFormulario({ ...formulario, bairro: e.target.value })} required />
-                <select value={formulario.tipo} onChange={(e) => setFormulario({ ...formulario, tipo: e.target.value })}>
-                  <option>apartamento</option><option>casa</option><option>terreno</option><option>comercial</option>
-                </select>
-              </div>
-              <div className="form-row">
-                <input type="number" placeholder="Quartos" value={formulario.quartos} onChange={(e) => setFormulario({ ...formulario, quartos: e.target.value })} />
-                <input type="number" placeholder="Banheiros" value={formulario.banheiros} onChange={(e) => setFormulario({ ...formulario, banheiros: e.target.value })} />
-                <input type="number" placeholder="Área (m²)" value={formulario.area_m2} onChange={(e) => setFormulario({ ...formulario, area_m2: e.target.value })} />
-              </div>
-              <textarea placeholder="Descrição" value={formulario.descricao} onChange={(e) => setFormulario({ ...formulario, descricao: e.target.value })}></textarea>
-              <div className="form-row">
-                <input type="tel" placeholder="Telefone" value={formulario.contato_telefone} onChange={(e) => setFormulario({ ...formulario, contato_telefone: e.target.value })} />
-                <input type="email" placeholder="Email" value={formulario.contato_email} onChange={(e) => setFormulario({ ...formulario, contato_email: e.target.value })} />
-              </div>
-              <button type="submit" className="btn-submit">Adicionar Imóvel</button>
-            </form>
-          </section>
-        )}
-
-        {aba === 'buscar' && (
-          <section className="secao">
-            <h2>Filtrar Imóveis</h2>
-            <div className="form-row">
-              <input type="text" placeholder="Bairro" value={filtro.bairro} onChange={(e) => setFiltro({ ...filtro, bairro: e.target.value })} />
-              <select value={filtro.tipo} onChange={(e) => setFiltro({ ...filtro, tipo: e.target.value })}>
-                <option value="">Todos os tipos</option><option>apartamento</option><option>casa</option><option>terreno</option><option>comercial</option>
-              </select>
-              <input type="number" placeholder="Preço mín" value={filtro.preco_min} onChange={(e) => setFiltro({ ...filtro, preco_min: e.target.value })} />
-              <input type="number" placeholder="Preço máx" value={filtro.preco_max} onChange={(e) => setFiltro({ ...filtro, preco_max: e.target.value })} />
-            </div>
-            <button onClick={buscarImoveis} className="btn-buscar">Buscar</button>
-          </section>
-        )}
-
-        {aba === 'lista' && (
+      <main className="conteudo">
+        {aba === 'buscar' ? (
           <>
-            <section className="secao">
-              <h2>Imóveis ({imoveis.length})</h2>
-              <div className="cards">
-                {imoveis.length === 0 ? (
-                  <p className="vazio">Nenhum imóvel. Adicione um!</p>
-                ) : (
-                  imoveis.map((im) => (
-                    <div key={im.id} className="card">
-                      <h3>{im.titulo}</h3>
-                      <p className="preco">R$ {im.preco?.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
-                      <p className="info"><strong>Local:</strong> {im.bairro} | {im.tipo}</p>
-                      <p className="info"><strong>Quartos:</strong> {im.quartos} | <strong>Área:</strong> {im.area_m2}m²</p>
-                      <p className="descricao">{im.descricao}</p>
-                      <p className="contato">☎ {im.contato_telefone} | 📧 {im.contato_email}</p>
-                      <div className="acoes">
-                        <button onClick={() => { setImovelSelecionado(im); analisarComIA(im.id); }} disabled={carregando} className="btn-analisa">
-                          {carregando ? '⏳ Analisando...' : '🤖 Analisar IA'}
-                        </button>
-                        <button onClick={() => deletar(im.id)} className="btn-deletar">🗑️ Deletar</button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
+            <section className="painel">
+              <h2>O que você está procurando?</h2>
+              <p className="ajuda">Só o bairro é obrigatório. Quanto mais campos preencher, mais precisa fica a busca.</p>
+
+              <form onSubmit={buscarAnuncios}>
+                <div className="grid grid-2">
+                  <label>
+                    <span>Bairro <em>obrigatório</em></span>
+                    <input
+                      type="text"
+                      placeholder="Ex: Águas Claras"
+                      value={formBusca.bairro}
+                      onChange={(e) => setFormBusca({ ...formBusca, bairro: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>Cidade</span>
+                    <input
+                      type="text"
+                      placeholder="Ex: Brasília"
+                      value={formBusca.cidade}
+                      onChange={(e) => setFormBusca({ ...formBusca, cidade: e.target.value })}
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-3">
+                  <label>
+                    <span>Tipo</span>
+                    <select value={formBusca.tipo} onChange={(e) => setFormBusca({ ...formBusca, tipo: e.target.value })}>
+                      <option value="">Qualquer</option>
+                      <option value="apartamento">Apartamento</option>
+                      <option value="casa">Casa</option>
+                      <option value="terreno">Terreno</option>
+                      <option value="comercial">Comercial</option>
+                      <option value="sala comercial">Sala comercial</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Preço mínimo</span>
+                    <input
+                      type="number"
+                      placeholder="R$"
+                      value={formBusca.preco_min}
+                      onChange={(e) => setFormBusca({ ...formBusca, preco_min: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>Preço máximo</span>
+                    <input
+                      type="number"
+                      placeholder="R$"
+                      value={formBusca.preco_max}
+                      onChange={(e) => setFormBusca({ ...formBusca, preco_max: e.target.value })}
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-3">
+                  <label>
+                    <span>Quartos (mínimo)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={formBusca.quartos_min}
+                      onChange={(e) => setFormBusca({ ...formBusca, quartos_min: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>Banheiros (mínimo)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={formBusca.banheiros_min}
+                      onChange={(e) => setFormBusca({ ...formBusca, banheiros_min: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>Vagas (mínimo)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={formBusca.vagas_min}
+                      onChange={(e) => setFormBusca({ ...formBusca, vagas_min: e.target.value })}
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-2">
+                  <label>
+                    <span>Área mínima (m²)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={formBusca.area_min}
+                      onChange={(e) => setFormBusca({ ...formBusca, area_min: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>Área máxima (m²)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={formBusca.area_max}
+                      onChange={(e) => setFormBusca({ ...formBusca, area_max: e.target.value })}
+                    />
+                  </label>
+                </div>
+
+                <label className="campo-largo">
+                  <span>Detalhes extras</span>
+                  <textarea
+                    rows="3"
+                    placeholder="Ex: com piscina, perto do metrô, aceita animais, mobiliado, aceita financiamento"
+                    value={formBusca.detalhes}
+                    onChange={(e) => setFormBusca({ ...formBusca, detalhes: e.target.value })}
+                  />
+                </label>
+
+                <div className="acoes-form">
+                  <button type="submit" className="btn btn-principal" disabled={buscando}>
+                    {buscando ? 'Buscando nos portais...' : 'Buscar imóveis'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-texto"
+                    onClick={() => { setFormBusca(FORM_BUSCA_INICIAL); setResultados(null); }}
+                    disabled={buscando}
+                  >
+                    Limpar campos
+                  </button>
+                </div>
+              </form>
             </section>
 
-            {analise && (
-              <section className="secao">
-                <h2>📊 Análise IA - {imovelSelecionado?.titulo}</h2>
-                <div className="resultado">
-                  <div className="analise-grid">
-                    <div className="item-analise"><label>Resumo</label><p>{analise.resumo}</p></div>
-                    <div className="item-analise"><label>Score</label><p className="score">{analise.score}/100</p><div className="barra-score"><div className="barra-preenchida" style={{ width: `${analise.score}%` }}></div></div></div>
-                    <div className="item-analise"><label>Parecer</label><p className="parecer">{analise.parecer}</p></div>
-                    <div className="item-analise"><label>Tempo de Venda</label><p>{analise.tempo_venda}</p></div>
-                    {analise.preco_sugestao && <div className="item-analise"><label>Preço Sugerido</label><p className="preco-sugestao">R$ {analise.preco_sugestao?.toLocaleString('pt-BR')}</p></div>}
-                    <div className="item-analise"><label>Oportunidade?</label><p className={analise.oportunidade ? 'oportunidade-sim' : 'oportunidade-nao'}>{analise.oportunidade ? '✅ Sim' : '❌ Não'}</p></div>
-                  </div>
-                </div>
+            {buscando ? (
+              <section className="painel estado">
+                <div className="spinner" />
+                <p>Consultando OLX, Viva Real, Zap, Imovelweb e QuintoAndar. Isso leva alguns segundos.</p>
               </section>
-            )}
+            ) : null}
+
+            {!buscando && resultados !== null ? (
+              <section className="resultados">
+                <div className="resultados-topo">
+                  <h2>{resultados.length} {resultados.length === 1 ? 'imóvel encontrado' : 'imóveis encontrados'}</h2>
+                  <span className="capturado">Capturado agora, confirme disponibilidade com o anunciante</span>
+                </div>
+
+                {resultados.length === 0 ? (
+                  <div className="painel estado">
+                    <p>Nenhum anúncio encontrado com esses critérios. Tente ampliar a faixa de preço ou remover alguns filtros.</p>
+                  </div>
+                ) : (
+                  <div className="lista">
+                    {resultados.map((anuncio, i) => {
+                      const link = montarLinkWhatsApp(anuncio.telefone, anuncio.titulo);
+                      return (
+                        <article className="card" key={i}>
+                          <div className="card-cabecalho">
+                            <div>
+                              <h3>{anuncio.titulo}</h3>
+                              <p className="local">
+                                {anuncio.bairro}
+                                {anuncio.cidade ? `, ${anuncio.cidade}` : ''}
+                                {anuncio.tipo ? ` · ${anuncio.tipo}` : ''}
+                              </p>
+                            </div>
+                            <span className="portal">{anuncio.site_origem}</span>
+                          </div>
+
+                          <p className="preco">{formatarPreco(anuncio.preco)}</p>
+
+                          <ul className="specs">
+                            {anuncio.quartos ? <li>{anuncio.quartos} quartos</li> : null}
+                            {anuncio.banheiros ? <li>{anuncio.banheiros} banheiros</li> : null}
+                            {anuncio.vagas ? <li>{anuncio.vagas} vagas</li> : null}
+                            {anuncio.area_m2 ? <li>{anuncio.area_m2} m²</li> : null}
+                          </ul>
+
+                          {anuncio.aceita_parceria === true ? (
+                            <span className="parceria parceria-sim">Anúncio menciona parceria</span>
+                          ) : anuncio.aceita_parceria === false ? (
+                            <span className="parceria parceria-nao">Anúncio informa que não faz parceria</span>
+                          ) : (
+                            <span className="parceria parceria-null">Parceria não informada, confirme no contato</span>
+                          )}
+
+                          {analises[i] ? <BlocoAnalise dados={analises[i]} /> : null}
+
+                          <div className="card-acoes">
+                            {link ? (
+                              <a className="btn btn-zap" href={link} target="_blank" rel="noreferrer">
+                                Falar no WhatsApp
+                              </a>
+                            ) : anuncio.link ? (
+                              <a className="btn btn-principal" href={anuncio.link} target="_blank" rel="noreferrer">
+                                Abrir anúncio original
+                              </a>
+                            ) : null}
+
+                            {link && anuncio.link ? (
+                              <a className="btn btn-secundario" href={anuncio.link} target="_blank" rel="noreferrer">
+                                Ver anúncio
+                              </a>
+                            ) : null}
+
+                            <button
+                              className="btn btn-texto"
+                              onClick={() => analisarAnuncio(anuncio, i)}
+                              disabled={analisando[i]}
+                            >
+                              {analisando[i] ? 'Analisando...' : analises[i] ? 'Analisar de novo' : 'Analisar preço com IA'}
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <section className="painel">
+              <div className="carteira-topo">
+                <div>
+                  <h2>Minha carteira</h2>
+                  <p className="ajuda">Os imóveis que você representa. Em breve conectamos direto com a API da imobiliária.</p>
+                </div>
+                <button className="btn btn-principal" onClick={() => setMostrarFormCarteira((v) => !v)}>
+                  {mostrarFormCarteira ? 'Cancelar' : 'Adicionar imóvel'}
+                </button>
+              </div>
+
+              {mostrarFormCarteira ? (
+                <form onSubmit={salvarNaCarteira} className="form-carteira">
+                  <div className="grid grid-2">
+                    <label>
+                      <span>Título <em>obrigatório</em></span>
+                      <input
+                        type="text"
+                        value={formCarteira.titulo}
+                        onChange={(e) => setFormCarteira({ ...formCarteira, titulo: e.target.value })}
+                        required
+                      />
+                    </label>
+                    <label>
+                      <span>Preço <em>obrigatório</em></span>
+                      <input
+                        type="number"
+                        value={formCarteira.preco}
+                        onChange={(e) => setFormCarteira({ ...formCarteira, preco: e.target.value })}
+                        required
+                      />
+                    </label>
+                  </div>
+
+                  <div className="grid grid-2">
+                    <label>
+                      <span>Bairro <em>obrigatório</em></span>
+                      <input
+                        type="text"
+                        value={formCarteira.bairro}
+                        onChange={(e) => setFormCarteira({ ...formCarteira, bairro: e.target.value })}
+                        required
+                      />
+                    </label>
+                    <label>
+                      <span>Tipo</span>
+                      <select
+                        value={formCarteira.tipo}
+                        onChange={(e) => setFormCarteira({ ...formCarteira, tipo: e.target.value })}
+                      >
+                        <option value="apartamento">Apartamento</option>
+                        <option value="casa">Casa</option>
+                        <option value="terreno">Terreno</option>
+                        <option value="comercial">Comercial</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="grid grid-3">
+                    <label>
+                      <span>Quartos</span>
+                      <input
+                        type="number"
+                        value={formCarteira.quartos}
+                        onChange={(e) => setFormCarteira({ ...formCarteira, quartos: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>Banheiros</span>
+                      <input
+                        type="number"
+                        value={formCarteira.banheiros}
+                        onChange={(e) => setFormCarteira({ ...formCarteira, banheiros: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>Área (m²)</span>
+                      <input
+                        type="number"
+                        value={formCarteira.area_m2}
+                        onChange={(e) => setFormCarteira({ ...formCarteira, area_m2: e.target.value })}
+                      />
+                    </label>
+                  </div>
+
+                  <label className="campo-largo">
+                    <span>Descrição</span>
+                    <textarea
+                      rows="3"
+                      value={formCarteira.descricao}
+                      onChange={(e) => setFormCarteira({ ...formCarteira, descricao: e.target.value })}
+                    />
+                  </label>
+
+                  <div className="grid grid-2">
+                    <label>
+                      <span>Telefone de contato</span>
+                      <input
+                        type="tel"
+                        value={formCarteira.contato_telefone}
+                        onChange={(e) => setFormCarteira({ ...formCarteira, contato_telefone: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>Email de contato</span>
+                      <input
+                        type="email"
+                        value={formCarteira.contato_email}
+                        onChange={(e) => setFormCarteira({ ...formCarteira, contato_email: e.target.value })}
+                      />
+                    </label>
+                  </div>
+
+                  <button type="submit" className="btn btn-principal" disabled={salvando}>
+                    {salvando ? 'Salvando...' : 'Salvar na carteira'}
+                  </button>
+                </form>
+              ) : null}
+            </section>
+
+            <section className="resultados">
+              {carteira.length === 0 ? (
+                <div className="painel estado">
+                  <p>Sua carteira está vazia. Adicione os imóveis que você representa.</p>
+                </div>
+              ) : (
+                <div className="lista">
+                  {carteira.map((im) => (
+                    <article className="card" key={im.id}>
+                      <div className="card-cabecalho">
+                        <div>
+                          <h3>{im.titulo}</h3>
+                          <p className="local">{im.bairro}{im.tipo ? ` · ${im.tipo}` : ''}</p>
+                        </div>
+                      </div>
+
+                      <p className="preco">{formatarPreco(im.preco)}</p>
+
+                      <ul className="specs">
+                        {im.quartos ? <li>{im.quartos} quartos</li> : null}
+                        {im.banheiros ? <li>{im.banheiros} banheiros</li> : null}
+                        {im.area_m2 ? <li>{Number(im.area_m2)} m²</li> : null}
+                      </ul>
+
+                      {im.descricao ? <p className="descricao">{im.descricao}</p> : null}
+
+                      {im.contato_telefone || im.contato_email ? (
+                        <p className="contato">
+                          {im.contato_telefone ? im.contato_telefone : ''}
+                          {im.contato_telefone && im.contato_email ? ' · ' : ''}
+                          {im.contato_email ? im.contato_email : ''}
+                        </p>
+                      ) : null}
+
+                      {analises[`c${im.id}`] ? <BlocoAnalise dados={analises[`c${im.id}`]} /> : null}
+
+                      <div className="card-acoes">
+                        <button
+                          className="btn btn-secundario"
+                          onClick={() => analisarDaCarteira(im.id)}
+                          disabled={analisando[`c${im.id}`]}
+                        >
+                          {analisando[`c${im.id}`] ? 'Analisando...' : 'Analisar preço com IA'}
+                        </button>
+                        <button className="btn btn-texto btn-perigo" onClick={() => removerDaCarteira(im.id)}>
+                          Remover
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
           </>
         )}
-      </div>
-      <footer className="footer"><p>Agregador Imobiliário com IA • 2024</p></footer>
+      </main>
+
+      <footer className="rodape">
+        <p>Radar Imobiliário · dados capturados de portais públicos, sempre confirme disponibilidade com o anunciante</p>
+      </footer>
     </div>
   );
 }
