@@ -198,9 +198,9 @@ app.post('/api/analisar-avulso', async (req, res) => {
 
 // ============ BUSCA DE ANÚNCIOS REAIS NA WEB ============
 
-app.post('/api/buscar-anuncios', async (req, res) => {
+app.all('/api/buscar-anuncios', async (req, res) => {
   try {
-    const { cidade, bairro, tipo, preco_min, preco_max, quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes } = req.body;
+    const { cidade, bairro, tipo, preco_min, preco_max, quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes } = { ...req.query, ...req.body };
     if (!bairro) return res.status(400).json({ erro: 'Informe o bairro para buscar' });
 
     const criterios = [
