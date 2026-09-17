@@ -27,9 +27,31 @@ app.get('/health', (req, res) => {
 });
 
 function extrairJSON(textoCompleto) {
-  const jsonMatch = textoCompleto.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('IA não retornou JSON válido: ' + textoCompleto.slice(0, 300));
-  return JSON.parse(jsonMatch[0]);
+  if (!textoCompleto || !textoCompleto.trim()) {
+    throw new Error('IA retornou resposta vazia');
+  }
+
+  // remove cercas de markdown, se vierem
+  let texto = textoCompleto.replace(/```json/gi, '').replace(/```/g, '');
+
+  // pega do primeiro abre chaves até o último fecha chaves
+  const inicio = texto.indexOf('{');
+  const fim = texto.lastIndexOf('}');
+  if (inicio === -1 || fim === -1) {
+    throw new Error('Nenhum bloco JSON encontrado na resposta: ' + textoCompleto.slice(0, 300));
+  }
+  texto = texto.slice(inicio, fim + 1);
+
+  // remove vírgulas sobrando antes de } ou ]
+  texto = texto.replace(/,(\s*[}\]])/g, '$1');
+
+  try {
+    return JSON.parse(texto);
+  } catch (erro) {
+    console.error('Falha ao parsear JSON. Motivo:', erro.message);
+    console.error('Texto que falhou:', texto.slice(0, 1500));
+    throw new Error('Resposta da IA veio malformada: ' + erro.message);
+  }
 }
 
 // Detecta se a URL aponta para um anúncio específico ou só para uma página de listagem
