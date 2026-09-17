@@ -613,3 +613,69 @@ textarea {
     flex: 1;
   }
 }
+.contato-assistido {
+  background: var(--verde-claro);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.contato-titulo {
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--verde-escuro);
+  margin-bottom: 10px;
+}
+
+.linha-copia {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--branco);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 7px;
+}
+
+.linha-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.linha-rotulo {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--tinta-fraca);
+}
+
+.linha-valor {
+  font-size: 13px;
+  color: var(--tinta);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linha-longa .linha-valor {
+  white-space: normal;
+  line-height: 1.45;
+}
+
+.btn-copiar {
+  flex-shrink: 0;
+  background: var(--verde);
+  color: var(--branco);
+  padding: 7px 14px;
+  font-size: 12.5px;
+}
+
+.btn-copiar:hover {
+  background: var(--verde-escuro);
+}
