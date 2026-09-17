@@ -37,6 +37,24 @@ const FORM_BUSCA_INICIAL = {
   detalhes: '',
 };
 
+const FORM_PERFIL_INICIAL = {
+  nome: '',
+  email: '',
+  telefone: '',
+  mensagem: 'Olá, sou corretor e vi o anúncio deste imóvel. Ele ainda está disponível? Vocês trabalham com parceria entre corretores?',
+};
+
+const CHAVE_PERFIL = 'radar_perfil_corretor';
+
+const carregarPerfil = () => {
+  try {
+    const bruto = localStorage.getItem(CHAVE_PERFIL);
+    return bruto ? { ...FORM_PERFIL_INICIAL, ...JSON.parse(bruto) } : FORM_PERFIL_INICIAL;
+  } catch {
+    return FORM_PERFIL_INICIAL;
+  }
+};
+
 const FORM_CARTEIRA_INICIAL = {
   titulo: '',
   preco: '',
@@ -60,12 +78,16 @@ function App() {
   const [analises, setAnalises] = useState({});
   const [analisando, setAnalisando] = useState({});
 
+  const [perfil, setPerfil] = useState(carregarPerfil);
+  const [contatoAberto, setContatoAberto] = useState(null);
+  const [copiado, setCopiado] = useState(null);
+
   const [carteira, setCarteira] = useState([]);
   const [formCarteira, setFormCarteira] = useState(FORM_CARTEIRA_INICIAL);
   const [salvando, setSalvando] = useState(false);
   const [mostrarFormCarteira, setMostrarFormCarteira] = useState(false);
 
-    const aviso = (texto, tipo = 'info') => {
+  const aviso = (texto, tipo = 'info') => {
     setMensagem({ texto, tipo });
     if (tipo !== 'erro') setTimeout(() => setMensagem(null), 5000);
   };
@@ -79,6 +101,7 @@ function App() {
     setBuscando(true);
     setResultados(null);
     setAnalises({});
+    setContatoAberto(null);
     try {
       const payload = Object.fromEntries(
         Object.entries(formBusca).filter(([, v]) => String(v).trim() !== '')
@@ -166,6 +189,79 @@ function App() {
     if (aba === 'carteira') carregarCarteira();
   }, [aba]);
 
+  const salvarPerfil = (e) => {
+    e.preventDefault();
+    try {
+      localStorage.setItem(CHAVE_PERFIL, JSON.stringify(perfil));
+      aviso('Perfil salvo neste navegador', 'sucesso');
+    } catch {
+      aviso('Não foi possível salvar o perfil neste navegador', 'erro');
+    }
+  };
+
+  const perfilPreenchido = Boolean(perfil.nome && perfil.telefone);
+
+  const copiar = async (texto, marcador) => {
+    try {
+      await navigator.clipboard.writeText(texto);
+      setCopiado(marcador);
+      setTimeout(() => setCopiado((m) => (m === marcador ? null : m)), 2000);
+    } catch {
+      aviso('Seu navegador bloqueou a cópia automática', 'erro');
+    }
+  };
+
+  const mensagemPara = (anuncio) => {
+    const base = perfil.mensagem || FORM_PERFIL_INICIAL.mensagem;
+    return `${base}\n\nImóvel: ${anuncio.titulo}`;
+  };
+
+  const BlocoContato = ({ anuncio, marcador }) => {
+    const campos = [
+      { rotulo: 'Nome', valor: perfil.nome },
+      { rotulo: 'Email', valor: perfil.email },
+      { rotulo: 'Telefone', valor: perfil.telefone },
+      { rotulo: 'Mensagem', valor: mensagemPara(anuncio), longo: true },
+    ].filter((c) => c.valor);
+
+    return (
+      <div className="contato-assistido">
+        <p className="contato-titulo">Cole no formulário do portal</p>
+        {campos.map((campo) => (
+          <div className={`linha-copia ${campo.longo ? 'linha-longa' : ''}`} key={campo.rotulo}>
+            <div className="linha-info">
+              <span className="linha-rotulo">{campo.rotulo}</span>
+              <span className="linha-valor">{campo.valor}</span>
+            </div>
+            <button
+              className="btn btn-copiar"
+              onClick={() => copiar(campo.valor, `${marcador}-${campo.rotulo}`)}
+            >
+              {copiado === `${marcador}-${campo.rotulo}` ? 'Copiado' : 'Copiar'}
+            </button>
+          </div>
+        ))}
+        <div className="linha-copia">
+          <div className="linha-info">
+            <span className="linha-rotulo">Tudo junto</span>
+            <span className="linha-valor">Nome, email, telefone e mensagem</span>
+          </div>
+          <button
+            className="btn btn-copiar"
+            onClick={() =>
+              copiar(
+                [perfil.nome, perfil.email, perfil.telefone, mensagemPara(anuncio)].filter(Boolean).join('\n'),
+                `${marcador}-tudo`
+              )
+            }
+          >
+            {copiado === `${marcador}-tudo` ? 'Copiado' : 'Copiar'}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const BlocoAnalise = ({ dados }) => (
     <div className="analise">
       <div className="analise-topo">
@@ -202,6 +298,9 @@ function App() {
             </button>
             <button className={aba === 'carteira' ? 'ativa' : ''} onClick={() => setAba('carteira')}>
               Minha carteira
+            </button>
+            <button className={aba === 'perfil' ? 'ativa' : ''} onClick={() => setAba('perfil')}>
+              Meu perfil
             </button>
           </nav>
         </div>
@@ -350,7 +449,7 @@ function App() {
             {buscando ? (
               <section className="painel estado">
                 <div className="spinner" />
-                <p>Consultando OLX, Viva Real, Zap, Imovelweb e QuintoAndar. Isso leva alguns segundos.</p>
+                <p>Consultando os portais de imóveis. Isso leva alguns segundos.</p>
               </section>
             ) : null}
 
@@ -402,18 +501,33 @@ function App() {
 
                           {analises[i] ? <BlocoAnalise dados={analises[i]} /> : null}
 
+                          {contatoAberto === i ? <BlocoContato anuncio={anuncio} marcador={i} /> : null}
+
                           <div className="card-acoes">
                             {link ? (
                               <a className="btn btn-zap" href={link} target="_blank" rel="noreferrer">
                                 Falar no WhatsApp
                               </a>
-                            ) : anuncio.link ? (
-                              <a className="btn btn-principal" href={anuncio.link} target="_blank" rel="noreferrer">
-                                Abrir anúncio original
-                              </a>
                             ) : null}
 
-                            {link && anuncio.link ? (
+                            {!link && anuncio.link ? (
+                              <button
+                                className="btn btn-principal"
+                                onClick={() => {
+                                  if (!perfilPreenchido) {
+                                    aviso('Preencha seu perfil primeiro para agilizar o contato', 'erro');
+                                    setAba('perfil');
+                                    return;
+                                  }
+                                  setContatoAberto((atual) => (atual === i ? null : i));
+                                  window.open(anuncio.link, '_blank', 'noopener');
+                                }}
+                              >
+                                {contatoAberto === i ? 'Contato aberto' : 'Contatar pelo portal'}
+                              </button>
+                            ) : null}
+
+                            {anuncio.link ? (
                               <a className="btn btn-secundario" href={anuncio.link} target="_blank" rel="noreferrer">
                                 Ver anúncio
                               </a>
@@ -435,6 +549,60 @@ function App() {
               </section>
             ) : null}
           </>
+        ) : aba === 'perfil' ? (
+          <section className="painel">
+            <h2>Meu perfil</h2>
+            <p className="ajuda">
+              Esses dados ficam salvos só neste navegador e são usados para agilizar o preenchimento
+              dos formulários de contato dos portais.
+            </p>
+
+            <form onSubmit={salvarPerfil}>
+              <div className="grid grid-2">
+                <label>
+                  <span>Nome <em>obrigatório</em></span>
+                  <input
+                    type="text"
+                    placeholder="Como aparece para o anunciante"
+                    value={perfil.nome}
+                    onChange={(e) => setPerfil({ ...perfil, nome: e.target.value })}
+                    required
+                  />
+                </label>
+                <label>
+                  <span>Telefone <em>obrigatório</em></span>
+                  <input
+                    type="tel"
+                    placeholder="(61) 90000-0000"
+                    value={perfil.telefone}
+                    onChange={(e) => setPerfil({ ...perfil, telefone: e.target.value })}
+                    required
+                  />
+                </label>
+              </div>
+
+              <label className="campo-largo">
+                <span>Email</span>
+                <input
+                  type="email"
+                  placeholder="seu@email.com"
+                  value={perfil.email}
+                  onChange={(e) => setPerfil({ ...perfil, email: e.target.value })}
+                />
+              </label>
+
+              <label className="campo-largo">
+                <span>Mensagem padrão</span>
+                <textarea
+                  rows="4"
+                  value={perfil.mensagem}
+                  onChange={(e) => setPerfil({ ...perfil, mensagem: e.target.value })}
+                />
+              </label>
+
+              <button type="submit" className="btn btn-principal">Salvar perfil</button>
+            </form>
+          </section>
         ) : (
           <>
             <section className="painel">
