@@ -153,10 +153,10 @@ Ao final, responda APENAS com um bloco JSON (sem texto antes ou depois, sem mark
   "oportunidade": true ou false
 }`;
 
-  const message = await client.messages.create({
+    const message = await client.messages.create({
     model: "claude-sonnet-5",
-    max_tokens: 1500,
-    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 4 }],
+    max_tokens: 6000,
+    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
     messages: [{ role: "user", content: prompt }],
   });
 
@@ -240,12 +240,17 @@ Encontre até 8 anúncios e responda APENAS com um bloco JSON (sem texto antes o
   ]
 }`;
 
-    const message = await client.messages.create({
+        const message = await client.messages.create({
       model: "claude-sonnet-5",
-      max_tokens: 4000,
+      max_tokens: 16000,
       tools: [
-        { type: "web_search_20250305", name: "web_search", max_uses: 6 },
-        { type: "web_fetch_20250910", name: "web_fetch", max_uses: 8 },
+        { type: "web_search_20250305", name: "web_search", max_uses: 3 },
+        {
+          type: "web_fetch_20250910",
+          name: "web_fetch",
+          max_uses: 4,
+          max_content_tokens: 6000,
+        },
       ],
       messages: [{ role: "user", content: prompt }],
     });
