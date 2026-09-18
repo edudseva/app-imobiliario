@@ -115,6 +115,7 @@ function BlocoAnalise({ dados }) {
           <span>Sugerido: <strong>{formatarPreco(dados.preco_sugestao)}</strong></span>
         ) : null}
         {dados.tempo_venda ? <span>Giro estimado: <strong>{dados.tempo_venda}</strong></span> : null}
+        {dados.do_cache ? <span className="selo-cache">análise salva {quandoFoi(dados.analisado_em)}</span> : null}
       </div>
     </div>
   );
@@ -375,6 +376,7 @@ function App() {
 
   const [formBusca, setFormBusca] = useState(() => lerLocal(CHAVE_BUSCA, FORM_BUSCA_INICIAL));
   const [buscando, setBuscando] = useState(false);
+  const [segundos, setSegundos] = useState(0);
   const [resultados, setResultados] = useState(null);
   const [infoCache, setInfoCache] = useState(null);
   const [analises, setAnalises] = useState({});
@@ -548,6 +550,14 @@ function App() {
     carregarSalvos();
     carregarHistorico();
   }, [sessao, carregarSalvos, carregarHistorico]);
+
+  // Contador de tempo da busca. Espera de 40 segundos sem sinal nenhum parece travamento.
+  useEffect(() => {
+    if (!buscando) return undefined;
+    setSegundos(0);
+    const id = setInterval(() => setSegundos((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [buscando]);
 
   const salvarNaCarteira = async (e) => {
     e.preventDefault();
@@ -774,7 +784,12 @@ function App() {
             {buscando ? (
               <section className="painel estado">
                 <div className="spinner" />
-                <p>Consultando os portais de imóveis. Isso leva alguns segundos.</p>
+                <p>Consultando os portais de imóveis.</p>
+                <p className="contador">{segundos}s</p>
+                <p className="ajuda-espera">
+                  Costuma levar de 20 a 60 segundos: a busca abre as páginas dos portais e
+                  lê os anúncios um a um. Repetir esta mesma busca hoje é instantâneo.
+                </p>
               </section>
             ) : null}
 
