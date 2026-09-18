@@ -461,6 +461,8 @@ function App() {
   const [rodando, setRodando] = useState({});
   const [imobiliaria, setImobiliaria] = useState(sessao?.usuario?.nome_imobiliaria || '');
   const [salvandoImobiliaria, setSalvandoImobiliaria] = useState(false);
+  const [notificacoes, setNotificacoes] = useState({ notificar_email: true, email_notificacao: '', email_ligado: false });
+  const [salvandoNotif, setSalvandoNotif] = useState(false);
 
   const aviso = (texto, tipo = 'info') => {
     setMensagem({ texto, tipo });
@@ -492,6 +494,7 @@ function App() {
     try {
       const res = await api.get('/auth/eu');
       setUso(res.data.uso_hoje);
+      if (res.data.notificacoes) setNotificacoes(res.data.notificacoes);
     } catch (error) {
       if (error?.response?.status === 401) sair();
     }
@@ -680,6 +683,23 @@ function App() {
       tratarErro(error, 'Não foi possível salvar a imobiliária');
     } finally {
       setSalvandoImobiliaria(false);
+    }
+  };
+
+  const salvarNotificacoes = async (e) => {
+    e.preventDefault();
+    setSalvandoNotif(true);
+    try {
+      const res = await api.put('/auth/notificacoes', {
+        notificar_email: notificacoes.notificar_email,
+        email_notificacao: notificacoes.email_notificacao || '',
+      });
+      setNotificacoes({ ...notificacoes, ...res.data });
+      aviso('Aviso por email atualizado', 'sucesso');
+    } catch (error) {
+      tratarErro(error, 'Não foi possível salvar o aviso');
+    } finally {
+      setSalvandoNotif(false);
     }
   };
 
@@ -1233,6 +1253,47 @@ function App() {
               </label>
               <button type="submit" className="btn btn-principal" disabled={salvandoImobiliaria}>
                 {salvandoImobiliaria ? 'Salvando...' : 'Salvar imobiliária'}
+              </button>
+            </form>
+          </section>
+
+          <section className="painel">
+            <h2>Aviso de imóvel novo</h2>
+            <p className="ajuda">
+              Quando uma busca agendada encontrar imóvel novo, você recebe um email com a lista e os links.
+              Só avisa quando tem novidade de verdade — a primeira execução nunca dispara aviso.
+            </p>
+
+            {!notificacoes.email_ligado ? (
+              <div className="alerta alerta-info" style={{ margin: '0 0 16px' }}>
+                O envio de email ainda não está configurado no servidor. A opção fica salva e passa a
+                valer assim que o SMTP for ligado.
+              </div>
+            ) : null}
+
+            <form onSubmit={salvarNotificacoes}>
+              <label className="interruptor" style={{ marginBottom: 16 }}>
+                <input
+                  type="checkbox"
+                  checked={notificacoes.notificar_email}
+                  onChange={(e) => setNotificacoes({ ...notificacoes, notificar_email: e.target.checked })}
+                />
+                <span>{notificacoes.notificar_email ? 'Avisar por email' : 'Não avisar'}</span>
+              </label>
+
+              <label className="campo-largo">
+                <span>Email para aviso</span>
+                <input
+                  type="email"
+                  placeholder={sessao.usuario?.email || 'seu@email.com'}
+                  value={notificacoes.email_notificacao || ''}
+                  onChange={(e) => setNotificacoes({ ...notificacoes, email_notificacao: e.target.value })}
+                />
+              </label>
+              <p className="ajuda">Deixe em branco para receber no email da conta.</p>
+
+              <button type="submit" className="btn btn-principal" disabled={salvandoNotif}>
+                {salvandoNotif ? 'Salvando...' : 'Salvar aviso'}
               </button>
             </form>
           </section>
