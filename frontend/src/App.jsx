@@ -5,6 +5,9 @@ import './complementos.css';
 
 const API_BASE = process.env.REACT_APP_API_URL || 'https://app-imobiliario-production.up.railway.app/api';
 
+// Atenção seletiva na primeira metade, retenção seletiva na segunda.
+const FRASE = 'Mostra o que interessa. Guarda o que você não pode esquecer.';
+
 const CHAVE_SESSAO = 'radar_sessao';
 const CHAVE_PERFIL = 'radar_perfil_corretor';
 const CHAVE_BUSCA = 'radar_ultima_busca';
@@ -228,7 +231,7 @@ function Login({ aoEntrar }) {
           <span className="marca-icone">🏙️</span>
           <div>
             <h1>Radar Imobiliário</h1>
-            <p>Imóveis de vários portais num lugar só</p>
+            <p className="frase">{FRASE}</p>
           </div>
         </div>
 
@@ -972,6 +975,7 @@ function App() {
               <section className="painel painel-abertura">
                 <p className="saudacao">{saudacao()}, {primeiroNome(sessao.usuario?.nome_imobiliaria)}</p>
                 <p className="data-hoje">{dataPorExtenso()}</p>
+                <p className="frase frase-dia">{FRASE}</p>
 
                 <div className="tiles">
                   <div className="tile">
