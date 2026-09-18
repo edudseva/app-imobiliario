@@ -3,10 +3,16 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const crypto = require('crypto');
 const mysql = require('mysql2/promise');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const Anthropic = require('@anthropic-ai/sdk');
 
 dotenv.config();
 const app = express();
+
+// Railway fica atrás de proxy: sem isso o rate limit enxerga todo mundo como um IP só
+app.set('trust proxy', 1);
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
@@ -20,9 +26,29 @@ const pool = mysql.createPool({
 
 const client = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
-// Por quantas horas uma busca fica valendo antes de consultar a IA de novo.
-// Inteiro validado aqui porque vai direto no SQL (nunca vem do usuário).
-const CACHE_HORAS = Math.min(Math.max(parseInt(process.env.CACHE_HORAS || '6', 10) || 6, 1), 168);
+// ============ CONFIGURAÇÃO ============
+
+// Inteiros validados aqui porque alguns vão direto no SQL (nunca vêm do usuário).
+const CACHE_HORAS = inteiroEntre(process.env.CACHE_HORAS, 6, 1, 168);
+const LIMITE_BUSCAS_DIA = inteiroEntre(process.env.LIMITE_BUSCAS_DIA, 40, 1, 1000);
+const LIMITE_ANALISES_DIA = inteiroEntre(process.env.LIMITE_ANALISES_DIA, 60, 1, 1000);
+const CODIGO_CONVITE = process.env.CODIGO_CONVITE || '';
+
+function inteiroEntre(valor, padrao, minimo, maximo) {
+  const n = parseInt(valor, 10);
+  if (!Number.isFinite(n)) return padrao;
+  return Math.min(Math.max(n, minimo), maximo);
+}
+
+// Sem segredo fixo, todo deploy derruba os logins. Avisa alto em vez de falhar calado.
+const JWT_SEGREDO = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+if (!process.env.JWT_SECRET) {
+  console.warn('ATENCAO: JWT_SECRET nao configurado. Usando segredo temporario.');
+  console.warn('Todo mundo sera deslogado a cada deploy. Configure JWT_SECRET no Railway.');
+}
+if (!CODIGO_CONVITE) {
+  console.warn('CODIGO_CONVITE nao configurado: cadastro de novas contas esta DESLIGADO.');
+}
 
 app.use(cors());
 app.use(express.json());
@@ -30,6 +56,216 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
+
+// ============ ERROS ============
+
+// Detalhe do erro vai pro log, nunca pro navegador.
+function falhou(res, contexto, error, status = 500) {
+  console.error(`[${contexto}]`, error);
+  res.status(status).json({ erro: 'Não foi possível concluir a operação. Tente de novo.' });
+}
+
+// ============ BANCO ============
+
+async function colunaExiste(tabela, coluna) {
+  const [rows] = await pool.query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1`,
+    [tabela, coluna]
+  );
+  return rows.length > 0;
+}
+
+// Cria/ajusta tudo sozinho no boot, sem precisar abrir o phpMyAdmin
+async function prepararBanco() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS usuarios (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        nome_imobiliaria VARCHAR(150) NOT NULL,
+        email VARCHAR(160) NOT NULL UNIQUE,
+        senha_hash VARCHAR(255) NOT NULL,
+        plano VARCHAR(20) NOT NULL DEFAULT 'basico',
+        ativo BOOLEAN NOT NULL DEFAULT TRUE,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS buscas_cache (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        chave CHAR(64) NOT NULL,
+        criterios TEXT,
+        resultado LONGTEXT NOT NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_chave_data (chave, criado_em)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS uso_diario (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        usuario_id INT NOT NULL,
+        dia DATE NOT NULL,
+        buscas INT NOT NULL DEFAULT 0,
+        analises INT NOT NULL DEFAULT 0,
+        UNIQUE KEY uk_usuario_dia (usuario_id, dia)
+      )
+    `);
+
+    // A carteira precisa ter dono, senão uma imobiliária enxerga a da outra.
+    if (!(await colunaExiste('imoveis', 'usuario_id'))) {
+      await pool.query('ALTER TABLE imoveis ADD COLUMN usuario_id INT NULL');
+      await pool.query('ALTER TABLE imoveis ADD INDEX idx_imoveis_usuario (usuario_id)');
+      console.log('Coluna usuario_id criada em imoveis. Imoveis antigos ficaram sem dono.');
+    }
+
+    await pool.query('DELETE FROM buscas_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
+    console.log(`Banco pronto. Cache: ${CACHE_HORAS}h. Teto: ${LIMITE_BUSCAS_DIA} buscas/dia.`);
+  } catch (error) {
+    console.error('Falha ao preparar o banco:', error.message);
+  }
+}
+
+// ============ AUTENTICAÇÃO ============
+
+function gerarToken(usuario) {
+  return jwt.sign(
+    { id: usuario.id, email: usuario.email, nome_imobiliaria: usuario.nome_imobiliaria },
+    JWT_SEGREDO,
+    { expiresIn: '30d' }
+  );
+}
+
+async function autenticar(req, res, next) {
+  const cabecalho = req.headers.authorization || '';
+  const token = cabecalho.startsWith('Bearer ') ? cabecalho.slice(7) : null;
+  if (!token) return res.status(401).json({ erro: 'Faça login para continuar' });
+
+  try {
+    const dados = jwt.verify(token, JWT_SEGREDO);
+    const [rows] = await pool.query('SELECT id, nome_imobiliaria, email, plano, ativo FROM usuarios WHERE id = ?', [dados.id]);
+    if (rows.length === 0 || !rows[0].ativo) {
+      return res.status(401).json({ erro: 'Conta inativa ou inexistente' });
+    }
+    req.usuario = rows[0];
+    next();
+  } catch {
+    return res.status(401).json({ erro: 'Sessão expirada. Faça login de novo.' });
+  }
+}
+
+const limitePorIp = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { erro: 'Muitas requisições. Espere alguns minutos.' },
+});
+
+const limiteLogin = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { erro: 'Muitas tentativas de login. Espere alguns minutos.' },
+});
+
+app.use('/api', limitePorIp);
+
+// Teto diário por usuário: é o freio de mão do custo de API.
+async function consumirCota(usuarioId, campo, teto) {
+  const [rows] = await pool.query(
+    'SELECT buscas, analises FROM uso_diario WHERE usuario_id = ? AND dia = CURDATE()',
+    [usuarioId]
+  );
+  const usado = rows.length > 0 ? rows[0][campo] : 0;
+  if (usado >= teto) return false;
+
+  await pool.query(
+    `INSERT INTO uso_diario (usuario_id, dia, ${campo}) VALUES (?, CURDATE(), 1)
+     ON DUPLICATE KEY UPDATE ${campo} = ${campo} + 1`,
+    [usuarioId]
+  );
+  return true;
+}
+
+app.post('/api/auth/registrar', limiteLogin, async (req, res) => {
+  try {
+    const { nome_imobiliaria, email, senha, codigo } = req.body;
+
+    if (!CODIGO_CONVITE) {
+      return res.status(403).json({ erro: 'Cadastro fechado no momento.' });
+    }
+    if (codigo !== CODIGO_CONVITE) {
+      return res.status(403).json({ erro: 'Código de convite inválido.' });
+    }
+    if (!nome_imobiliaria || !email || !senha) {
+      return res.status(400).json({ erro: 'Preencha nome da imobiliária, email e senha.' });
+    }
+    if (String(senha).length < 8) {
+      return res.status(400).json({ erro: 'A senha precisa ter pelo menos 8 caracteres.' });
+    }
+
+    const emailLimpo = String(email).trim().toLowerCase();
+    const [existe] = await pool.query('SELECT id FROM usuarios WHERE email = ?', [emailLimpo]);
+    if (existe.length > 0) {
+      return res.status(409).json({ erro: 'Já existe uma conta com esse email.' });
+    }
+
+    const senhaHash = await bcrypt.hash(String(senha), 10);
+    const [result] = await pool.query(
+      'INSERT INTO usuarios (nome_imobiliaria, email, senha_hash) VALUES (?, ?, ?)',
+      [String(nome_imobiliaria).trim(), emailLimpo, senhaHash]
+    );
+
+    const usuario = { id: result.insertId, email: emailLimpo, nome_imobiliaria: String(nome_imobiliaria).trim() };
+    res.status(201).json({ token: gerarToken(usuario), usuario });
+  } catch (error) { falhou(res, 'registrar', error); }
+});
+
+app.post('/api/auth/login', limiteLogin, async (req, res) => {
+  try {
+    const { email, senha } = req.body;
+    if (!email || !senha) return res.status(400).json({ erro: 'Informe email e senha.' });
+
+    const emailLimpo = String(email).trim().toLowerCase();
+    const [rows] = await pool.query('SELECT * FROM usuarios WHERE email = ?', [emailLimpo]);
+
+    // Mesma resposta para email inexistente e senha errada: não entrega quem tem conta.
+    if (rows.length === 0 || !rows[0].ativo) {
+      return res.status(401).json({ erro: 'Email ou senha incorretos.' });
+    }
+    const confere = await bcrypt.compare(String(senha), rows[0].senha_hash);
+    if (!confere) {
+      return res.status(401).json({ erro: 'Email ou senha incorretos.' });
+    }
+
+    const usuario = { id: rows[0].id, email: rows[0].email, nome_imobiliaria: rows[0].nome_imobiliaria };
+    res.json({ token: gerarToken(usuario), usuario });
+  } catch (error) { falhou(res, 'login', error); }
+});
+
+app.get('/api/auth/eu', autenticar, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT buscas, analises FROM uso_diario WHERE usuario_id = ? AND dia = CURDATE()',
+      [req.usuario.id]
+    );
+    const uso = rows[0] || { buscas: 0, analises: 0 };
+    res.json({
+      usuario: req.usuario,
+      uso_hoje: {
+        buscas: uso.buscas,
+        buscas_restantes: Math.max(LIMITE_BUSCAS_DIA - uso.buscas, 0),
+        analises: uso.analises,
+        analises_restantes: Math.max(LIMITE_ANALISES_DIA - uso.analises, 0),
+      },
+    });
+  } catch (error) { falhou(res, 'eu', error); }
+});
+
+// ============ AUXILIARES ============
 
 function extrairJSON(textoCompleto) {
   if (!textoCompleto || !textoCompleto.trim()) {
@@ -74,28 +310,6 @@ function ehLinkDeAnuncio(url) {
 }
 
 // ============ CACHE DE BUSCAS ============
-
-// Cria a tabela sozinha no primeiro boot, sem precisar mexer no phpMyAdmin
-async function garantirTabelaCache() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS buscas_cache (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        chave CHAR(64) NOT NULL,
-        criterios TEXT,
-        resultado LONGTEXT NOT NULL,
-        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_chave_data (chave, criado_em)
-      )
-    `);
-    // limpa o que já não serve pra ninguém
-    await pool.query('DELETE FROM buscas_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
-    console.log(`Cache de buscas pronto. Validade: ${CACHE_HORAS}h`);
-  } catch (error) {
-    console.error('Nao foi possivel preparar a tabela de cache:', error.message);
-    console.error('A busca continua funcionando, mas sem cache (custo cheio por busca).');
-  }
-}
 
 // Mesmos critérios, escritos de formas diferentes, precisam gerar a mesma chave.
 // "Águas Claras", "aguas claras" e " AGUAS CLARAS " são a mesma busca.
@@ -147,79 +361,89 @@ async function gravarNoCache(chave, criterios, anuncios) {
   }
 }
 
-// ============ CARTEIRA DE IMÓVEIS (cadastro manual do corretor) ============
+// ============ CARTEIRA DE IMÓVEIS (do corretor logado) ============
 
-app.get('/api/imoveis', async (req, res) => {
+app.get('/api/imoveis', autenticar, async (req, res) => {
   try {
     const { bairro, tipo, preco_min, preco_max } = req.query;
-    let query = 'SELECT * FROM imoveis WHERE status = ? ORDER BY criado_em DESC';
-    let params = ['ativo'];
-    if (bairro && bairro.trim()) { query += ` AND bairro LIKE ?`; params.push(`%${bairro}%`); }
-    if (tipo && tipo.trim()) { query += ` AND tipo = ?`; params.push(tipo); }
-    if (preco_min) { query += ` AND preco >= ?`; params.push(parseFloat(preco_min)); }
-    if (preco_max) { query += ` AND preco <= ?`; params.push(parseFloat(preco_max)); }
+    let query = 'SELECT * FROM imoveis WHERE status = ? AND usuario_id = ?';
+    let params = ['ativo', req.usuario.id];
+    if (bairro && bairro.trim()) { query += ' AND bairro LIKE ?'; params.push(`%${bairro}%`); }
+    if (tipo && tipo.trim()) { query += ' AND tipo = ?'; params.push(tipo); }
+    if (preco_min) { query += ' AND preco >= ?'; params.push(parseFloat(preco_min)); }
+    if (preco_max) { query += ' AND preco <= ?'; params.push(parseFloat(preco_max)); }
+    query += ' ORDER BY criado_em DESC';
     const [rows] = await pool.query(query, params);
     res.json(rows);
-  } catch (error) { console.error(error); res.status(500).json({ erro: error.message }); }
+  } catch (error) { falhou(res, 'listar imoveis', error); }
 });
 
-app.get('/api/imoveis/:id', async (req, res) => {
+app.get('/api/imoveis/:id', autenticar, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM imoveis WHERE id = ?', [req.params.id]);
+    const [rows] = await pool.query('SELECT * FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
     res.json(rows[0]);
-  } catch (error) { res.status(500).json({ erro: error.message }); }
+  } catch (error) { falhou(res, 'ver imovel', error); }
 });
 
-app.post('/api/imoveis', async (req, res) => {
+app.post('/api/imoveis', autenticar, async (req, res) => {
   try {
     const { titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao, contato_telefone, contato_email } = req.body;
     if (!titulo || !preco || !bairro) return res.status(400).json({ erro: 'Campos obrigatórios: título, preço, bairro' });
     const [result] = await pool.query(
-      `INSERT INTO imoveis (titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao, contato_telefone, contato_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [titulo, parseFloat(preco), bairro, tipo, quartos, banheiros, area_m2, descricao, contato_telefone, contato_email]
+      `INSERT INTO imoveis (usuario_id, titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao, contato_telefone, contato_email)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [req.usuario.id, titulo, parseFloat(preco), bairro, tipo, quartos || null, banheiros || null, area_m2 || null, descricao, contato_telefone, contato_email]
     );
     const [rows] = await pool.query('SELECT * FROM imoveis WHERE id = ?', [result.insertId]);
     res.status(201).json(rows[0]);
-  } catch (error) { console.error(error); res.status(500).json({ erro: error.message }); }
+  } catch (error) { falhou(res, 'criar imovel', error); }
 });
 
-app.delete('/api/imoveis/:id', async (req, res) => {
+app.delete('/api/imoveis/:id', autenticar, async (req, res) => {
   try {
-    const [result] = await pool.query('DELETE FROM imoveis WHERE id = ?', [req.params.id]);
+    const [result] = await pool.query('DELETE FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
     if (result.affectedRows === 0) return res.status(404).json({ erro: 'Não encontrado' });
     res.json({ ok: true });
-  } catch (error) { res.status(500).json({ erro: error.message }); }
+  } catch (error) { falhou(res, 'remover imovel', error); }
 });
 
-app.post('/api/imoveis/:id/analisar', async (req, res) => {
+app.post('/api/imoveis/:id/analisar', autenticar, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM imoveis WHERE id = ?', [req.params.id]);
+    const [rows] = await pool.query('SELECT * FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
-    const im = rows[0];
 
+    const temCota = await consumirCota(req.usuario.id, 'analises', LIMITE_ANALISES_DIA);
+    if (!temCota) return res.status(429).json({ erro: `Limite de ${LIMITE_ANALISES_DIA} análises por dia atingido.` });
+
+    const im = rows[0];
     const resposta = await analisarPreco({
       titulo: im.titulo, preco: im.preco, bairro: im.bairro, tipo: im.tipo,
       quartos: im.quartos, banheiros: im.banheiros, area_m2: im.area_m2, descricao: im.descricao,
     });
 
     await pool.query(
-      `INSERT INTO analises_ia (imovel_id, resumo, score, preco_sugestao) VALUES (?, ?, ?, ?)`,
+      'INSERT INTO analises_ia (imovel_id, resumo, score, preco_sugestao) VALUES (?, ?, ?, ?)',
       [req.params.id, resposta.resumo, resposta.score, resposta.preco_sugestao]
     );
 
     res.json(resposta);
-  } catch (error) { console.error('Erro na análise IA:', error); res.status(500).json({ erro: error.message }); }
+  } catch (error) { falhou(res, 'analisar imovel', error); }
 });
 
-app.get('/api/imoveis/:id/analise', async (req, res) => {
+app.get('/api/imoveis/:id/analise', autenticar, async (req, res) => {
   try {
-    const [rows] = await pool.query(`SELECT * FROM analises_ia WHERE imovel_id = ? ORDER BY data_analise DESC LIMIT 1`, [req.params.id]);
+    const [dono] = await pool.query('SELECT id FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
+    if (dono.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
+    const [rows] = await pool.query(
+      'SELECT * FROM analises_ia WHERE imovel_id = ? ORDER BY data_analise DESC LIMIT 1',
+      [req.params.id]
+    );
     res.json(rows[0] || {});
-  } catch (error) { res.status(500).json({ erro: error.message }); }
+  } catch (error) { falhou(res, 'ver analise', error); }
 });
 
-// ============ FUNÇÃO COMPARTILHADA DE ANÁLISE ============
+// ============ ANÁLISE DE PREÇO ============
 
 async function analisarPreco(im) {
   const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
@@ -255,29 +479,33 @@ Ao final, responda APENAS com um bloco JSON (sem texto antes ou depois, sem mark
 }`;
 
   const message = await client.messages.create({
-    model: "claude-sonnet-5",
+    model: 'claude-sonnet-5',
     max_tokens: 6000,
-    tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
-    messages: [{ role: "user", content: prompt }],
+    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+    messages: [{ role: 'user', content: prompt }],
   });
 
-  const textoCompleto = message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+  const textoCompleto = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
   return extrairJSON(textoCompleto);
 }
 
 // Análise avulsa: recebe os dados direto no corpo, sem precisar estar salvo no banco
-app.post('/api/analisar-avulso', async (req, res) => {
+app.post('/api/analisar-avulso', autenticar, async (req, res) => {
   try {
     const { titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao } = req.body;
     if (!titulo || !preco || !bairro) return res.status(400).json({ erro: 'Dados insuficientes para análise' });
+
+    const temCota = await consumirCota(req.usuario.id, 'analises', LIMITE_ANALISES_DIA);
+    if (!temCota) return res.status(429).json({ erro: `Limite de ${LIMITE_ANALISES_DIA} análises por dia atingido.` });
+
     const resposta = await analisarPreco({ titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao });
     res.json(resposta);
-  } catch (error) { console.error('Erro na análise avulsa:', error); res.status(500).json({ erro: error.message }); }
+  } catch (error) { falhou(res, 'analise avulsa', error); }
 });
 
 // ============ BUSCA DE ANÚNCIOS REAIS NA WEB ============
 
-app.all('/api/buscar-anuncios', async (req, res) => {
+app.post('/api/buscar-anuncios', autenticar, async (req, res) => {
   try {
     const entrada = { ...req.query, ...req.body };
     const { cidade, bairro, tipo, preco_min, preco_max, quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes, forcar } = entrada;
@@ -290,15 +518,21 @@ app.all('/api/buscar-anuncios', async (req, res) => {
     const chave = chaveDaBusca(criterios);
     const ignorarCache = forcar === '1' || forcar === 1 || forcar === true || forcar === 'true';
 
+    // Cache não consome cota: resultado salvo não custa API.
     if (!ignorarCache) {
       const salvo = await lerDoCache(chave);
       if (salvo) {
-        console.log(`Cache HIT para ${bairro} (chave ${chave.slice(0, 8)}), nenhuma chamada de IA feita`);
+        console.log(`Cache HIT ${chave.slice(0, 8)} (${bairro}), nenhuma chamada de IA`);
         return res.json({ anuncios: salvo.anuncios, do_cache: true, buscado_em: salvo.buscado_em });
       }
     }
 
-    console.log(`Cache MISS para ${bairro} (chave ${chave.slice(0, 8)}), consultando a IA`);
+    const temCota = await consumirCota(req.usuario.id, 'buscas', LIMITE_BUSCAS_DIA);
+    if (!temCota) {
+      return res.status(429).json({ erro: `Limite de ${LIMITE_BUSCAS_DIA} buscas por dia atingido. Volta amanhã.` });
+    }
+
+    console.log(`Cache MISS ${chave.slice(0, 8)} (${bairro}), consultando a IA`);
 
     const linhasCriterios = [
       `Localização: ${bairro}${cidade ? `, ${cidade}` : ''}`,
@@ -325,6 +559,8 @@ Método obrigatório de trabalho:
 1. Use web_search para localizar as páginas de resultado dos portais que atendam aos critérios.
 2. Use web_fetch para ABRIR essas páginas de listagem e extrair de dentro delas os anúncios individuais, com a URL específica de cada imóvel, o preço e as características reais.
 3. Se útil, use web_fetch novamente na página do anúncio individual para confirmar preço, características e telefone de contato.
+
+Priorize portais que publicam o telefone do anunciante na própria página, porque o objetivo é permitir o contato imediato.
 
 Regras rígidas sobre o campo "link":
 - Deve ser a URL da PÁGINA DO ANÚNCIO ESPECÍFICO daquele imóvel, com identificador ou slug próprio do imóvel.
@@ -362,28 +598,30 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
 }`;
 
     const message = await client.messages.create({
-      model: "claude-sonnet-5",
+      model: 'claude-sonnet-5',
       max_tokens: 16000,
       tools: [
-        { type: "web_search_20250305", name: "web_search", max_uses: 6 },
+        { type: 'web_search_20250305', name: 'web_search', max_uses: 6 },
         {
-          type: "web_fetch_20250910",
-          name: "web_fetch",
+          type: 'web_fetch_20250910',
+          name: 'web_fetch',
           max_uses: 10,
           max_content_tokens: 6000,
         },
       ],
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: 'user', content: prompt }],
     });
 
-    const textoCompleto = message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    const textoCompleto = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
 
-    console.log('=== DIAGNOSTICO BUSCA ===');
-    console.log('stop_reason:', message.stop_reason);
-    console.log('tipos de bloco:', message.content.map(b => b.type).join(', '));
-    console.log('tamanho do texto:', textoCompleto.length);
-    console.log('resposta bruta:', textoCompleto.slice(0, 2000));
-    console.log('=========================');
+    if (process.env.DEBUG_BUSCA === '1') {
+      console.log('=== DIAGNOSTICO BUSCA ===');
+      console.log('stop_reason:', message.stop_reason);
+      console.log('tipos de bloco:', message.content.map((b) => b.type).join(', '));
+      console.log('tamanho do texto:', textoCompleto.length);
+      console.log('resposta bruta:', textoCompleto.slice(0, 2000));
+      console.log('=========================');
+    }
 
     const resposta = extrairJSON(textoCompleto);
 
@@ -399,11 +637,11 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
     }
 
     res.json({ anuncios, do_cache: false, buscado_em: new Date() });
-  } catch (error) { console.error('Erro ao buscar anúncios:', error); res.status(500).json({ erro: error.message }); }
+  } catch (error) { falhou(res, 'buscar anuncios', error); }
 });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, async () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
-  await garantirTabelaCache();
+  await prepararBanco();
 });
