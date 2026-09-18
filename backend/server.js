@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const crypto = require('crypto');
 const mysql = require('mysql2/promise');
 const Anthropic = require('@anthropic-ai/sdk');
 
@@ -18,6 +19,10 @@ const pool = mysql.createPool({
 });
 
 const client = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+
+// Por quantas horas uma busca fica valendo antes de consultar a IA de novo.
+// Inteiro validado aqui porque vai direto no SQL (nunca vem do usuário).
+const CACHE_HORAS = Math.min(Math.max(parseInt(process.env.CACHE_HORAS || '6', 10) || 6, 1), 168);
 
 app.use(cors());
 app.use(express.json());
@@ -65,6 +70,80 @@ function ehLinkDeAnuncio(url) {
     return temIdLongo || temSlugDetalhado || segmentos.length >= 5;
   } catch {
     return false;
+  }
+}
+
+// ============ CACHE DE BUSCAS ============
+
+// Cria a tabela sozinha no primeiro boot, sem precisar mexer no phpMyAdmin
+async function garantirTabelaCache() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS buscas_cache (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        chave CHAR(64) NOT NULL,
+        criterios TEXT,
+        resultado LONGTEXT NOT NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_chave_data (chave, criado_em)
+      )
+    `);
+    // limpa o que já não serve pra ninguém
+    await pool.query('DELETE FROM buscas_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
+    console.log(`Cache de buscas pronto. Validade: ${CACHE_HORAS}h`);
+  } catch (error) {
+    console.error('Nao foi possivel preparar a tabela de cache:', error.message);
+    console.error('A busca continua funcionando, mas sem cache (custo cheio por busca).');
+  }
+}
+
+// Mesmos critérios, escritos de formas diferentes, precisam gerar a mesma chave.
+// "Águas Claras", "aguas claras" e " AGUAS CLARAS " são a mesma busca.
+function normalizar(valor) {
+  if (valor === null || valor === undefined) return '';
+  return String(valor)
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function chaveDaBusca(criterios) {
+  const base = [
+    'cidade', 'bairro', 'tipo', 'preco_min', 'preco_max',
+    'quartos_min', 'banheiros_min', 'vagas_min', 'area_min', 'area_max', 'detalhes',
+  ]
+    .map((campo) => `${campo}=${normalizar(criterios[campo])}`)
+    .join('|');
+
+  return crypto.createHash('sha256').update(base).digest('hex');
+}
+
+async function lerDoCache(chave) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT resultado, criado_em FROM buscas_cache
+       WHERE chave = ? AND criado_em > (NOW() - INTERVAL ${CACHE_HORAS} HOUR)
+       ORDER BY criado_em DESC LIMIT 1`,
+      [chave]
+    );
+    if (rows.length === 0) return null;
+    return { anuncios: JSON.parse(rows[0].resultado), buscado_em: rows[0].criado_em };
+  } catch (error) {
+    console.error('Falha ao ler cache (seguindo sem ele):', error.message);
+    return null;
+  }
+}
+
+async function gravarNoCache(chave, criterios, anuncios) {
+  try {
+    await pool.query(
+      'INSERT INTO buscas_cache (chave, criterios, resultado) VALUES (?, ?, ?)',
+      [chave, JSON.stringify(criterios), JSON.stringify(anuncios)]
+    );
+  } catch (error) {
+    console.error('Falha ao gravar cache (resultado foi entregue mesmo assim):', error.message);
   }
 }
 
@@ -175,7 +254,7 @@ Ao final, responda APENAS com um bloco JSON (sem texto antes ou depois, sem mark
   "oportunidade": true ou false
 }`;
 
-    const message = await client.messages.create({
+  const message = await client.messages.create({
     model: "claude-sonnet-5",
     max_tokens: 6000,
     tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
@@ -200,10 +279,28 @@ app.post('/api/analisar-avulso', async (req, res) => {
 
 app.all('/api/buscar-anuncios', async (req, res) => {
   try {
-    const { cidade, bairro, tipo, preco_min, preco_max, quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes } = { ...req.query, ...req.body };
+    const entrada = { ...req.query, ...req.body };
+    const { cidade, bairro, tipo, preco_min, preco_max, quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes, forcar } = entrada;
     if (!bairro) return res.status(400).json({ erro: 'Informe o bairro para buscar' });
 
-    const criterios = [
+    const criterios = {
+      cidade, bairro, tipo, preco_min, preco_max,
+      quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes,
+    };
+    const chave = chaveDaBusca(criterios);
+    const ignorarCache = forcar === '1' || forcar === 1 || forcar === true || forcar === 'true';
+
+    if (!ignorarCache) {
+      const salvo = await lerDoCache(chave);
+      if (salvo) {
+        console.log(`Cache HIT para ${bairro} (chave ${chave.slice(0, 8)}), nenhuma chamada de IA feita`);
+        return res.json({ anuncios: salvo.anuncios, do_cache: true, buscado_em: salvo.buscado_em });
+      }
+    }
+
+    console.log(`Cache MISS para ${bairro} (chave ${chave.slice(0, 8)}), consultando a IA`);
+
+    const linhasCriterios = [
       `Localização: ${bairro}${cidade ? `, ${cidade}` : ''}`,
       tipo && `Tipo: ${tipo}`,
       preco_min && `Preço mínimo: R$ ${preco_min}`,
@@ -222,7 +319,7 @@ app.all('/api/buscar-anuncios', async (req, res) => {
 
 Encontre anúncios REAIS e ATIVOS de imóveis à venda em portais como OLX, Viva Real, Zap Imóveis, Imovelweb, DF Imóveis, MGF Imóveis e QuintoAndar, que combinem com estes critérios:
 
-${criterios}
+${linhasCriterios}
 
 Método obrigatório de trabalho:
 1. Use web_search para localizar as páginas de resultado dos portais que atendam aos critérios.
@@ -264,11 +361,11 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
   ]
 }`;
 
-        const message = await client.messages.create({
+    const message = await client.messages.create({
       model: "claude-sonnet-5",
       max_tokens: 16000,
       tools: [
-          { type: "web_search_20250305", name: "web_search", max_uses: 6 },
+        { type: "web_search_20250305", name: "web_search", max_uses: 6 },
         {
           type: "web_fetch_20250910",
           name: "web_fetch",
@@ -279,7 +376,7 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
       messages: [{ role: "user", content: prompt }],
     });
 
-        const textoCompleto = message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    const textoCompleto = message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
 
     console.log('=== DIAGNOSTICO BUSCA ===');
     console.log('stop_reason:', message.stop_reason);
@@ -296,9 +393,17 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
       link: ehLinkDeAnuncio(a.link) ? a.link : null,
     }));
 
-    res.json({ anuncios });
+    // só vale guardar busca que achou alguma coisa
+    if (anuncios.length > 0) {
+      await gravarNoCache(chave, criterios, anuncios);
+    }
+
+    res.json({ anuncios, do_cache: false, buscado_em: new Date() });
   } catch (error) { console.error('Erro ao buscar anúncios:', error); res.status(500).json({ erro: error.message }); }
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+  await garantirTabelaCache();
+});
