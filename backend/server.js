@@ -676,6 +676,84 @@ app.get('/api/historico', autenticar, async (req, res) => {
   } catch (error) { falhou(res, 'listar historico', error); }
 });
 
+// ============ RESUMO DO DIA ============
+// Tela de abertura: o que exige ação hoje, sem ele precisar procurar.
+
+const DIAS_SEM_RESPOSTA = inteiroEntre(process.env.DIAS_SEM_RESPOSTA, 3, 1, 60);
+const DIAS_PARCERIA_PARADA = inteiroEntre(process.env.DIAS_PARCERIA_PARADA, 7, 1, 90);
+
+function salvoParaJson(row) {
+  return { ...row, dados: row.dados ? JSON.parse(row.dados) : null };
+}
+
+app.get('/api/resumo', autenticar, async (req, res) => {
+  try {
+    const id = req.usuario.id;
+
+    const [alertasAtivos] = await pool.query(
+      'SELECT id, nome, novos, ultima_execucao FROM alertas WHERE usuario_id = ? AND ativo = TRUE ORDER BY ultima_execucao DESC',
+      [id]
+    );
+
+    // Contatou e ninguém respondeu: é o follow-up que costuma ser esquecido.
+    const [semResposta] = await pool.query(
+      `SELECT * FROM anuncios_salvos
+       WHERE usuario_id = ? AND status = 'contatado'
+         AND contatado_em IS NOT NULL
+         AND contatado_em < (NOW() - INTERVAL ${DIAS_SEM_RESPOSTA} DAY)
+       ORDER BY contatado_em ASC LIMIT 20`,
+      [id]
+    );
+
+    // Aceitou parceria e parou: é dinheiro esfriando na mesa.
+    const [parceriaParada] = await pool.query(
+      `SELECT * FROM anuncios_salvos
+       WHERE usuario_id = ? AND status = 'aceita_parceria'
+         AND atualizado_em < (NOW() - INTERVAL ${DIAS_PARCERIA_PARADA} DAY)
+       ORDER BY atualizado_em ASC LIMIT 20`,
+      [id]
+    );
+
+    // Favoritou e nunca chamou ninguém.
+    const [favoritosSemContato] = await pool.query(
+      `SELECT * FROM anuncios_salvos
+       WHERE usuario_id = ? AND favorito = TRUE AND status IS NULL
+       ORDER BY criado_em DESC LIMIT 20`,
+      [id]
+    );
+
+    const [uso] = await pool.query(
+      'SELECT buscas, analises FROM uso_diario WHERE usuario_id = ? AND dia = CURDATE()',
+      [id]
+    );
+    const usoHoje = uso[0] || { buscas: 0, analises: 0 };
+
+    const novosPorAlerta = alertasAtivos
+      .map((a) => ({
+        id: a.id,
+        nome: a.nome,
+        ultima_execucao: a.ultima_execucao,
+        novos: a.novos ? JSON.parse(a.novos) : [],
+      }))
+      .filter((a) => a.novos.length > 0);
+
+    res.json({
+      novos_por_alerta: novosPorAlerta,
+      total_novos: novosPorAlerta.reduce((s, a) => s + a.novos.length, 0),
+      sem_resposta: semResposta.map(salvoParaJson),
+      parceria_parada: parceriaParada.map(salvoParaJson),
+      favoritos_sem_contato: favoritosSemContato.map(salvoParaJson),
+      alertas_ativos: alertasAtivos.length,
+      dias_sem_resposta: DIAS_SEM_RESPOSTA,
+      dias_parceria_parada: DIAS_PARCERIA_PARADA,
+      uso_hoje: {
+        buscas: usoHoje.buscas,
+        buscas_restantes: Math.max(LIMITE_BUSCAS_DIA - usoHoje.buscas, 0),
+      },
+    });
+  } catch (error) { falhou(res, 'resumo do dia', error); }
+});
+
 // ============ CARTEIRA DE IMÓVEIS (do corretor logado) ============
 
 app.get('/api/imoveis', autenticar, async (req, res) => {
