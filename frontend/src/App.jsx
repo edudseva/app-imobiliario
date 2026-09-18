@@ -310,6 +310,42 @@ function ControleStatus({ salvo, aoMarcarStatus }) {
   );
 }
 
+// Linha de pendência do "Meu dia": o mínimo para decidir e agir sem sair da tela.
+function ItemPendencia({ registro, aoMudarStatus }) {
+  const anuncio = registro.dados || registro;
+  const zap = montarLinkWhatsApp(anuncio.telefone, registro.titulo);
+
+  return (
+    <div className="pendencia">
+      <div className="pendencia-info">
+        <span className="pendencia-titulo">{registro.titulo}</span>
+        <span className="pendencia-meta">
+          {formatarPreco(registro.preco)}
+          {registro.site_origem ? ` · ${registro.site_origem}` : ''}
+          {registro.contatado_em ? ` · contatado ${quandoFoi(registro.contatado_em)}` : ''}
+        </span>
+      </div>
+      <div className="pendencia-acoes">
+        <select
+          className="status-select"
+          value={registro.status || ''}
+          onChange={(e) => aoMudarStatus(e.target.value)}
+        >
+          <option value="">Não contatado</option>
+          {Object.entries(STATUS_ROTULOS).map(([v, r]) => (
+            <option key={v} value={v}>{r}</option>
+          ))}
+        </select>
+        {zap ? (
+          <a className="btn btn-zap" href={zap} target="_blank" rel="noreferrer">Cobrar no WhatsApp</a>
+        ) : registro.link ? (
+          <a className="btn btn-secundario" href={registro.link} target="_blank" rel="noreferrer">Abrir anúncio</a>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function CartaoResultado({ anuncio, analise, analisando, perfil, perfilPreenchido, contatoAberto, copiado, salvo, aoAnalisar, aoAbrirContato, aoCopiar, aoFavoritar, aoMarcarStatus, aoContatar }) {
   const zap = montarLinkWhatsApp(anuncio.telefone, anuncio.titulo);
   const favorito = Boolean(salvo?.favorito);
@@ -395,7 +431,8 @@ function CartaoResultado({ anuncio, analise, analisando, perfil, perfilPreenchid
 function App() {
   const [sessao, setSessao] = useState(() => lerLocal(CHAVE_SESSAO, null));
   const [uso, setUso] = useState(null);
-  const [aba, setAba] = useState('buscar');
+  const [aba, setAba] = useState('dia');
+  const [resumo, setResumo] = useState(null);
   const [mensagem, setMensagem] = useState(null);
 
   const [formBusca, setFormBusca] = useState(() => lerLocal(CHAVE_BUSCA, FORM_BUSCA_INICIAL));
@@ -579,8 +616,9 @@ function App() {
     carregarSalvos();
     carregarHistorico();
     carregarAlertas();
+    carregarResumo();
     setImobiliaria(sessao.usuario?.nome_imobiliaria || '');
-  }, [sessao, carregarSalvos, carregarHistorico, carregarAlertas]);
+  }, [sessao, carregarSalvos, carregarHistorico, carregarAlertas, carregarResumo]);
 
   // Contador de tempo da busca. Espera de 40 segundos sem sinal nenhum parece travamento.
   useEffect(() => {
@@ -654,6 +692,15 @@ function App() {
   };
 
   // ===== Alertas =====
+
+  const carregarResumo = useCallback(async () => {
+    try {
+      const res = await api.get('/resumo');
+      setResumo(res.data);
+    } catch (error) {
+      if (error?.response?.status === 401) sair();
+    }
+  }, [sair]);
 
   const carregarAlertas = useCallback(async () => {
     try {
@@ -757,6 +804,16 @@ function App() {
 
   const totalNovos = alertas.reduce((soma, a) => soma + (a.novos ? a.novos.length : 0), 0);
 
+  const pendencias = resumo
+    ? resumo.total_novos + resumo.sem_resposta.length + resumo.parceria_parada.length
+    : 0;
+
+  const mudarStatusPendencia = async (registro, status) => {
+    const anuncio = registro.dados || registro;
+    await marcarAnuncio(anuncio, idDoAnuncio(registro, registro.id), { status: status || null });
+    carregarResumo();
+  };
+
   if (!sessao) return <Login aoEntrar={entrar} />;
 
   return (
@@ -775,6 +832,9 @@ function App() {
             </div>
           </div>
           <nav className="abas">
+            <button className={aba === 'dia' ? 'ativa' : ''} onClick={() => { setAba('dia'); carregarResumo(); }}>
+              Meu dia{pendencias ? ` (${pendencias})` : ''}
+            </button>
             <button className={aba === 'buscar' ? 'ativa' : ''} onClick={() => setAba('buscar')}>Buscar imóveis</button>
             <button className={aba === 'salvos' ? 'ativa' : ''} onClick={() => setAba('salvos')}>
               Salvos{Object.keys(salvos).length ? ` (${Object.keys(salvos).length})` : ''}
@@ -791,7 +851,87 @@ function App() {
       {mensagem ? <div className={`alerta alerta-${mensagem.tipo}`}>{mensagem.texto}</div> : null}
 
       <main className="conteudo">
-        {aba === 'buscar' ? (
+        {aba === 'dia' ? (
+          <>
+            {!resumo ? (
+              <section className="painel estado"><div className="spinner" /><p>Carregando seu dia.</p></section>
+            ) : pendencias === 0 && resumo.favoritos_sem_contato.length === 0 ? (
+              <section className="painel estado">
+                <p>Nada pendente por aqui.</p>
+                <p className="ajuda-espera">
+                  {resumo.alertas_ativos > 0
+                    ? `Você tem ${resumo.alertas_ativos} busca(s) agendada(s). Quando aparecer imóvel novo, ele cai aqui.`
+                    : 'Agende uma busca para receber os imóveis novos nesta tela todo dia.'}
+                </p>
+              </section>
+            ) : null}
+
+            {resumo && resumo.novos_por_alerta.length > 0 ? (
+              <section className="painel">
+                <h2>Novos desde ontem</h2>
+                <p className="ajuda">Apareceram nas suas buscas agendadas. Chegar primeiro é o que ganha a parceria.</p>
+                {resumo.novos_por_alerta.map((al) => (
+                  <div className="grupo-novos" key={al.id}>
+                    <p className="grupo-titulo">{al.nome} · {al.novos.length} novo(s)</p>
+                    {al.novos.slice(0, 6).map((a, i) => (
+                      <div className="pendencia" key={a.link || i}>
+                        <div className="pendencia-info">
+                          <span className="pendencia-titulo">{a.titulo}</span>
+                          <span className="pendencia-meta">
+                            {formatarPreco(a.preco)}
+                            {a.site_origem ? ` · ${a.site_origem}` : ''}
+                          </span>
+                        </div>
+                        <div className="pendencia-acoes">
+                          {montarLinkWhatsApp(a.telefone, a.titulo) ? (
+                            <a className="btn btn-zap" target="_blank" rel="noreferrer"
+                              href={montarLinkWhatsApp(a.telefone, a.titulo)}>WhatsApp</a>
+                          ) : a.link ? (
+                            <a className="btn btn-secundario" href={a.link} target="_blank" rel="noreferrer">Abrir anúncio</a>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+                <button className="btn btn-texto" onClick={() => setAba('alertas')}>Ver buscas agendadas</button>
+              </section>
+            ) : null}
+
+            {resumo && resumo.sem_resposta.length > 0 ? (
+              <section className="painel">
+                <h2>Sem resposta há {resumo.dias_sem_resposta} dias ou mais</h2>
+                <p className="ajuda">Você contatou e ninguém voltou. Cobrar de novo costuma destravar.</p>
+                {resumo.sem_resposta.map((r) => (
+                  <ItemPendencia key={r.chave} registro={r} aoMudarStatus={(s) => mudarStatusPendencia(r, s)} />
+                ))}
+              </section>
+            ) : null}
+
+            {resumo && resumo.parceria_parada.length > 0 ? (
+              <section className="painel">
+                <h2>Parceria aceita e parada</h2>
+                <p className="ajuda">
+                  Aceitaram parceria há mais de {resumo.dias_parceria_parada} dias e nada andou.
+                  É o que está mais perto de virar comissão.
+                </p>
+                {resumo.parceria_parada.map((r) => (
+                  <ItemPendencia key={r.chave} registro={r} aoMudarStatus={(s) => mudarStatusPendencia(r, s)} />
+                ))}
+              </section>
+            ) : null}
+
+            {resumo && resumo.favoritos_sem_contato.length > 0 ? (
+              <section className="painel">
+                <h2>Favoritados e nunca contatados</h2>
+                <p className="ajuda">Você marcou como interessante e parou aí.</p>
+                {resumo.favoritos_sem_contato.map((r) => (
+                  <ItemPendencia key={r.chave} registro={r} aoMudarStatus={(s) => mudarStatusPendencia(r, s)} />
+                ))}
+              </section>
+            ) : null}
+          </>
+        ) : aba === 'buscar' ? (
           <>
             <section className="painel">
               <h2>O que você está procurando?</h2>
