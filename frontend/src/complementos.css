@@ -1,0 +1,85 @@
+/* Estilos das telas novas: login, cota diária e indicador de cache.
+   Ficam separados do App.css para não misturar com o layout já validado. */
+
+.tela-login {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: linear-gradient(135deg, #f4f7fa 0%, #e8eef6 100%);
+}
+
+.caixa-login {
+  width: 100%;
+  max-width: 420px;
+  background: var(--branco);
+  border: 1px solid var(--linha);
+  border-radius: var(--raio);
+  padding: 32px;
+  box-shadow: var(--sombra);
+}
+
+.marca-login {
+  margin-bottom: 26px;
+}
+
+.caixa-login .alerta {
+  margin: 0 0 18px;
+}
+
+.caixa-login label {
+  margin-bottom: 16px;
+}
+
+.btn-bloco {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.topo-direita {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.cota {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--azul);
+  background: var(--azul-claro);
+  padding: 5px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.frescor {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.frescor .btn-texto {
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .caixa-login {
+    padding: 24px 20px;
+  }
+
+  .topo-direita {
+    width: 100%;
+    margin-left: 0;
+    margin-top: 10px;
+    justify-content: space-between;
+  }
+
+  .marca {
+    flex-wrap: wrap;
+  }
+}
