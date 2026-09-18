@@ -6,6 +6,7 @@ const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
+const nodemailer = require('nodemailer');
 const Anthropic = require('@anthropic-ai/sdk');
 
 dotenv.config();
@@ -58,6 +59,101 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
+
+// ============ EMAIL ============
+// SMTP da Hostinger, que já está pago. Sem configuração, o app funciona igual,
+// só não avisa ninguém.
+
+const SMTP_HOST = process.env.SMTP_HOST || '';
+const SMTP_PORT = inteiroEntre(process.env.SMTP_PORT, 465, 1, 65535);
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
+const APP_URL = process.env.APP_URL || 'https://app-imobiliario-kappa.vercel.app';
+
+const emailLigado = Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS);
+let transporte = null;
+
+if (emailLigado) {
+  transporte = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+  console.log(`Email de alerta ligado via ${SMTP_HOST}:${SMTP_PORT}`);
+} else {
+  console.warn('SMTP nao configurado: alertas nao enviam email. Configure SMTP_HOST, SMTP_USER e SMTP_PASS.');
+}
+
+function escaparHtml(texto) {
+  return String(texto || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Falha de email nunca derruba o alerta: o resultado já está salvo no app.
+async function enviarEmail(para, assunto, html, texto) {
+  if (!emailLigado || !para) return false;
+  try {
+    await transporte.sendMail({ from: SMTP_FROM, to: para, subject: assunto, text: texto, html });
+    console.log(`Email enviado para ${para}: ${assunto}`);
+    return true;
+  } catch (error) {
+    console.error('Falha ao enviar email:', error.message);
+    return false;
+  }
+}
+
+function montarEmailDeNovos(nomeAlerta, novos) {
+  const linhas = novos.slice(0, 10).map((a) => {
+    const preco = a.preco ? `R$ ${Number(a.preco).toLocaleString('pt-BR')}` : 'preço não informado';
+    const onde = [a.bairro, a.cidade].filter(Boolean).join(', ');
+    return { titulo: a.titulo || 'Anúncio', preco, onde, portal: a.site_origem || '', link: a.link || '' };
+  });
+
+  const texto = [
+    `${novos.length} imóvel(is) novo(s) na sua busca "${nomeAlerta}".`,
+    '',
+    ...linhas.map((l) => `- ${l.titulo}\n  ${l.preco} · ${l.onde} · ${l.portal}\n  ${l.link}`),
+    '',
+    `Ver tudo no app: ${APP_URL}`,
+  ].join('\n');
+
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;color:#222">
+      <h2 style="font-size:18px;font-weight:500;margin:0 0 4px">
+        ${novos.length} imóvel(is) novo(s)
+      </h2>
+      <p style="color:#666;font-size:14px;margin:0 0 20px">
+        Na sua busca <strong>${escaparHtml(nomeAlerta)}</strong>
+      </p>
+      ${linhas.map((l) => `
+        <div style="border-left:3px solid #5aa9e6;padding:10px 14px;margin-bottom:12px;background:#f7f9fb">
+          <div style="font-size:15px;margin-bottom:4px">${escaparHtml(l.titulo)}</div>
+          <div style="font-size:14px;font-weight:bold;margin-bottom:4px">${escaparHtml(l.preco)}</div>
+          <div style="color:#666;font-size:13px;margin-bottom:6px">
+            ${escaparHtml(l.onde)}${l.portal ? ' · ' + escaparHtml(l.portal) : ''}
+          </div>
+          ${l.link ? `<a href="${escaparHtml(l.link)}" style="color:#3d8ed1;font-size:13px">Abrir anúncio</a>` : ''}
+        </div>
+      `).join('')}
+      ${novos.length > 10 ? `<p style="color:#666;font-size:13px">E mais ${novos.length - 10} no app.</p>` : ''}
+      <p style="margin-top:22px">
+        <a href="${APP_URL}" style="background:#5aa9e6;color:#fff;padding:11px 20px;border-radius:6px;text-decoration:none;font-size:14px;display:inline-block">
+          Abrir o Radar Imobiliário
+        </a>
+      </p>
+      <p style="color:#999;font-size:12px;margin-top:24px">
+        Você recebe este aviso porque tem uma busca agendada ativa.
+        Para parar, desative o alerta ou desmarque o aviso por email no seu perfil.
+      </p>
+    </div>`;
+
+  return { texto, html };
+}
 
 // ============ ERROS ============
 
@@ -179,6 +275,12 @@ async function prepararBanco() {
         INDEX idx_alertas_usuario (usuario_id, ativo)
       )
     `);
+
+    if (!(await colunaExiste('usuarios', 'notificar_email'))) {
+      await pool.query('ALTER TABLE usuarios ADD COLUMN notificar_email BOOLEAN NOT NULL DEFAULT TRUE');
+      await pool.query('ALTER TABLE usuarios ADD COLUMN email_notificacao VARCHAR(160) NULL');
+      console.log('Colunas de notificacao criadas em usuarios.');
+    }
 
     // A carteira precisa ter dono, senão uma imobiliária enxerga a da outra.
     if (!(await colunaExiste('imoveis', 'usuario_id'))) {
@@ -320,9 +422,18 @@ app.get('/api/auth/eu', autenticar, async (req, res) => {
       'SELECT buscas, analises FROM uso_diario WHERE usuario_id = ? AND dia = CURDATE()',
       [req.usuario.id]
     );
+    const [conta] = await pool.query(
+      'SELECT notificar_email, email_notificacao FROM usuarios WHERE id = ?',
+      [req.usuario.id]
+    );
     const uso = rows[0] || { buscas: 0, analises: 0 };
     res.json({
       usuario: req.usuario,
+      notificacoes: {
+        notificar_email: conta[0] ? Boolean(conta[0].notificar_email) : true,
+        email_notificacao: conta[0] ? conta[0].email_notificacao : null,
+        email_ligado: emailLigado,
+      },
       uso_hoje: {
         buscas: uso.buscas,
         buscas_restantes: Math.max(LIMITE_BUSCAS_DIA - uso.buscas, 0),
@@ -331,6 +442,27 @@ app.get('/api/auth/eu', autenticar, async (req, res) => {
       },
     });
   } catch (error) { falhou(res, 'eu', error); }
+});
+
+app.put('/api/auth/notificacoes', autenticar, async (req, res) => {
+  try {
+    const { notificar_email, email_notificacao } = req.body;
+    const destino = String(email_notificacao || '').trim().toLowerCase();
+    if (destino && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(destino)) {
+      return res.status(400).json({ erro: 'Email inválido.' });
+    }
+
+    await pool.query(
+      'UPDATE usuarios SET notificar_email = ?, email_notificacao = ? WHERE id = ?',
+      [notificar_email === undefined ? true : Boolean(notificar_email), destino || null, req.usuario.id]
+    );
+
+    res.json({
+      notificar_email: notificar_email === undefined ? true : Boolean(notificar_email),
+      email_notificacao: destino || null,
+      email_ligado: emailLigado,
+    });
+  } catch (error) { falhou(res, 'atualizar notificacoes', error); }
 });
 
 // Trocar a imobiliária. O corretor pode mudar de casa sem perder a conta e o histórico.
@@ -1067,8 +1199,29 @@ app.post('/api/alertas/:id/rodar', autenticar, async (req, res) => {
   } catch (error) { falhou(res, 'rodar alerta', error); }
 });
 
+async function avisarPorEmail(alerta, novos) {
+  if (novos.length === 0) return;
+  try {
+    const [rows] = await pool.query(
+      'SELECT email, email_notificacao, notificar_email FROM usuarios WHERE id = ?',
+      [alerta.usuario_id]
+    );
+    if (rows.length === 0 || !rows[0].notificar_email) return;
+
+    const destino = rows[0].email_notificacao || rows[0].email;
+    const { texto, html } = montarEmailDeNovos(alerta.nome, novos);
+    const assunto = novos.length === 1
+      ? `1 imóvel novo em ${alerta.nome}`
+      : `${novos.length} imóveis novos em ${alerta.nome}`;
+    await enviarEmail(destino, assunto, html, texto);
+  } catch (error) {
+    console.error('Falha ao avisar por email:', error.message);
+  }
+}
+
 // Compara com a execução anterior. É daqui que sai o "apareceu imóvel novo".
-async function rodarAlerta(alerta) {
+// notificar = false quando ele mesmo clicou "rodar agora": está olhando a tela.
+async function rodarAlerta(alerta, notificar = false) {
   const criterios = JSON.parse(alerta.criterios);
   const anteriores = alerta.ultimo_resultado ? JSON.parse(alerta.ultimo_resultado) : [];
   const chavesAntigas = new Set(anteriores.map(chaveDoAnuncio));
@@ -1095,6 +1248,11 @@ async function rodarAlerta(alerta) {
       ]
     );
     console.log(`Alerta ${alerta.id} rodou: ${anuncios.length} anuncios, ${novos.length} novos, ${sumidos.length} sumiram`);
+
+    // Primeira execução não avisa: seria a lista inteira como "novidade".
+    if (notificar && anteriores.length > 0 && novos.length > 0) {
+      await avisarPorEmail(alerta, novos);
+    }
   } catch (error) {
     console.error(`Alerta ${alerta.id} falhou:`, error.message);
     await pool.query('UPDATE alertas SET ultima_execucao = NOW(), erro = ? WHERE id = ?', [
@@ -1131,7 +1289,7 @@ async function processarAlertas() {
         ]);
         continue;
       }
-      await rodarAlerta(alerta);
+      await rodarAlerta(alerta, true);
     }
   } catch (error) {
     console.error('Falha ao processar alertas:', error.message);
