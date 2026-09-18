@@ -953,7 +953,8 @@ function App() {
         </div>
       ) : null}
 
-      {notificacoes.email_ligado === false ? (
+      {/* Só na aba de agendadas: é o único lugar onde a falta do email muda alguma coisa. */}
+      {notificacoes.email_ligado === false && aba === 'alertas' ? (
         <div className="faixa-aviso">
           <div className="faixa-conteudo">
             <span className="faixa-texto">
