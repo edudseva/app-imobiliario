@@ -169,6 +169,146 @@
   font-style: italic;
 }
 
+/* ===== Buscas agendadas ===== */
+
+.lista-alertas {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.alerta-card {
+  border-left: 3px solid var(--acento);
+}
+
+.alerta-inativo {
+  border-left-color: var(--linha-forte);
+  opacity: 0.68;
+}
+
+.alerta-topo {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.alerta-topo h3 {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--texto);
+  text-transform: capitalize;
+}
+
+.alerta-criterios {
+  font-size: 12.5px;
+  color: var(--texto-fraco);
+  margin-top: 5px;
+  line-height: 1.5;
+}
+
+.interruptor {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-height: var(--toque);
+  cursor: pointer;
+}
+
+.interruptor input {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  accent-color: var(--acento);
+  cursor: pointer;
+}
+
+.interruptor span {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--texto-fraco);
+}
+
+.alerta-linha {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.alerta-hora {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.alerta-hora > span {
+  margin: 0;
+}
+
+.alerta-hora .status-select {
+  width: auto;
+  min-width: 96px;
+}
+
+.alerta-erro-txt {
+  font-size: 12.5px;
+  color: #f3a9a7;
+  background: var(--vermelho-fraco);
+  padding: 8px 10px;
+  border-radius: var(--raio);
+  margin-bottom: 12px;
+}
+
+.bloco-novos {
+  background: var(--acento-fraco);
+  border-radius: var(--raio);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.bloco-titulo {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--acento);
+  margin-bottom: 10px;
+}
+
+.novo-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.novo-item:last-child {
+  border-bottom: none;
+}
+
+.novo-titulo {
+  font-size: 13px;
+  color: var(--texto-suave);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.novo-preco {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--texto);
+  white-space: nowrap;
+}
+
 @media (min-width: 720px) {
   .caixa-login {
     padding: 32px;
