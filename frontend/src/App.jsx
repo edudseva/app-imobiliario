@@ -69,6 +69,20 @@ const montarLinkWhatsApp = (telefone, titulo) => {
 // Identidade estável do anúncio. Índice de array troca de dono quando a lista muda.
 const idDoAnuncio = (anuncio, i) => anuncio.link || `${anuncio.site_origem || 's'}-${anuncio.titulo || i}`;
 
+const formatarData = (d) => (d ? new Date(d).toLocaleDateString('pt-BR') : '');
+
+const saudacao = () => {
+  const h = new Date().getHours();
+  if (h < 12) return 'Bom dia';
+  if (h < 18) return 'Boa tarde';
+  return 'Boa noite';
+};
+
+const primeiroNome = (nome) => String(nome || '').trim().split(/\s+/)[0] || '';
+
+const dataPorExtenso = () =>
+  new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
+
 const quandoFoi = (data) => {
   if (!data) return '';
   const minutos = Math.round((Date.now() - new Date(data).getTime()) / 60000);
@@ -461,8 +475,14 @@ function App() {
   const [rodando, setRodando] = useState({});
   const [imobiliaria, setImobiliaria] = useState(sessao?.usuario?.nome_imobiliaria || '');
   const [salvandoImobiliaria, setSalvandoImobiliaria] = useState(false);
-  const [notificacoes, setNotificacoes] = useState({ notificar_email: true, email_notificacao: '', email_ligado: false });
+  // email_ligado começa null (desconhecido) para a faixa de aviso não piscar antes de carregar.
+  const [notificacoes, setNotificacoes] = useState({ notificar_email: true, email_notificacao: '', email_ligado: null });
   const [salvandoNotif, setSalvandoNotif] = useState(false);
+  const [assinatura, setAssinatura] = useState(null);
+  const [catalogo, setCatalogo] = useState(null);
+  const [equipe, setEquipe] = useState(null);
+  const [formMembro, setFormMembro] = useState({ nome: '', email: '', senha: '' });
+  const [salvandoMembro, setSalvandoMembro] = useState(false);
 
   const aviso = (texto, tipo = 'info') => {
     setMensagem({ texto, tipo });
@@ -493,7 +513,8 @@ function App() {
   const carregarUso = useCallback(async () => {
     try {
       const res = await api.get('/auth/eu');
-      setUso(res.data.uso_hoje);
+      setUso(res.data.uso_mes);
+      if (res.data.assinatura) setAssinatura(res.data.assinatura);
       if (res.data.notificacoes) setNotificacoes(res.data.notificacoes);
     } catch (error) {
       if (error?.response?.status === 401) sair();
@@ -703,6 +724,52 @@ function App() {
     }
   };
 
+  // ===== Plano e equipe =====
+
+  const carregarPlano = useCallback(async () => {
+    try {
+      const [cat, eq] = await Promise.all([api.get('/planos'), api.get('/equipe')]);
+      setCatalogo(cat.data);
+      setEquipe(eq.data);
+    } catch (error) {
+      if (error?.response?.status === 401) sair();
+    }
+  }, [sair]);
+
+  const adicionarMembro = async (e) => {
+    e.preventDefault();
+    setSalvandoMembro(true);
+    try {
+      await api.post('/equipe', formMembro);
+      setFormMembro({ nome: '', email: '', senha: '' });
+      aviso('Corretor adicionado', 'sucesso');
+      await carregarPlano();
+    } catch (error) {
+      tratarErro(error, 'Não foi possível adicionar');
+    } finally {
+      setSalvandoMembro(false);
+    }
+  };
+
+  const removerMembro = async (id) => {
+    if (!window.confirm('Remover este corretor? Ele perde o acesso.')) return;
+    try {
+      await api.delete(`/equipe/${id}`);
+      await carregarPlano();
+    } catch (error) {
+      tratarErro(error, 'Não foi possível remover');
+    }
+  };
+
+  const assinarPlano = async (planoId) => {
+    try {
+      await api.post('/assinatura/checkout', { plano: planoId });
+    } catch (error) {
+      // 501 é o esperado enquanto o pagamento não está ligado.
+      aviso(mensagemDeErro(error, 'Pagamento ainda não conectado.'), 'erro');
+    }
+  };
+
   // ===== Alertas =====
 
   const carregarResumo = useCallback(async () => {
@@ -849,7 +916,7 @@ function App() {
               <p>{sessao.usuario?.nome_imobiliaria}</p>
             </div>
             <div className="topo-direita">
-              {uso ? <span className="cota">{uso.buscas_restantes} buscas hoje</span> : null}
+              {uso ? <span className="cota">{uso.buscas_restantes} buscas no mês</span> : null}
               <button className="btn btn-texto" onClick={sair}>Sair</button>
             </div>
           </div>
@@ -866,15 +933,96 @@ function App() {
             </button>
             <button className={aba === 'carteira' ? 'ativa' : ''} onClick={() => setAba('carteira')}>Minha carteira</button>
             <button className={aba === 'perfil' ? 'ativa' : ''} onClick={() => setAba('perfil')}>Meu perfil</button>
+            <button className={aba === 'plano' ? 'ativa' : ''} onClick={() => { setAba('plano'); carregarPlano(); }}>Plano</button>
           </nav>
         </div>
       </header>
+
+      {assinatura && assinatura.vencida ? (
+        <div className="faixa-aviso faixa-grave">
+          <div className="faixa-conteudo">
+            <span className="faixa-texto">
+              <strong>Assinatura vencida.</strong> Buscar e analisar estão bloqueados. Tudo que você
+              já salvou continua aqui e volta assim que o plano for renovado.
+            </span>
+            <button className="btn btn-texto" onClick={() => { setAba('plano'); carregarPlano(); }}>Ver planos</button>
+          </div>
+        </div>
+      ) : null}
+
+      {notificacoes.email_ligado === false ? (
+        <div className="faixa-aviso">
+          <div className="faixa-conteudo">
+            <span className="faixa-texto">
+              <strong>Aviso por email não configurado.</strong> As buscas agendadas rodam e mostram os
+              imóveis novos aqui dentro, mas ninguém recebe aviso fora do app enquanto o SMTP não for
+              ligado no servidor.
+            </span>
+            <button className="btn btn-texto" onClick={() => setAba('perfil')}>Ver detalhes</button>
+          </div>
+        </div>
+      ) : null}
 
       {mensagem ? <div className={`alerta alerta-${mensagem.tipo}`}>{mensagem.texto}</div> : null}
 
       <main className="conteudo">
         {aba === 'dia' ? (
           <>
+            {resumo ? (
+              <section className="painel painel-abertura">
+                <p className="saudacao">{saudacao()}, {primeiroNome(sessao.usuario?.nome_imobiliaria)}</p>
+                <p className="data-hoje">{dataPorExtenso()}</p>
+
+                <div className="tiles">
+                  <div className="tile">
+                    <span className="tile-numero">{resumo.total_novos}</span>
+                    <span className="tile-rotulo">novos hoje</span>
+                  </div>
+                  <div className="tile">
+                    <span className="tile-numero">{resumo.sem_resposta.length}</span>
+                    <span className="tile-rotulo">sem resposta</span>
+                  </div>
+                  <div className="tile tile-bom">
+                    <span className="tile-numero">{resumo.numeros.parcerias}</span>
+                    <span className="tile-rotulo">parcerias aceitas</span>
+                  </div>
+                  <div className="tile">
+                    <span className="tile-numero">{resumo.numeros.alertas_ativos_n}</span>
+                    <span className="tile-rotulo">buscas ativas</span>
+                  </div>
+                </div>
+
+                {resumo.numeros.salvos > 0 ? (
+                  <div className="funil">
+                    <p className="funil-titulo">Seu funil</p>
+                    {[
+                      ['Salvos', resumo.numeros.salvos, 'funil-1'],
+                      ['Contatados', resumo.numeros.contatados, 'funil-2'],
+                      ['Responderam', resumo.numeros.responderam, 'funil-3'],
+                      ['Aceitaram parceria', resumo.numeros.parcerias, 'funil-4'],
+                    ].map(([rotulo, valor, cls]) => (
+                      <div className="funil-linha" key={rotulo}>
+                        <span className="funil-rotulo">{rotulo}</span>
+                        <div className="funil-barra">
+                          <div
+                            className={`funil-fill ${cls}`}
+                            style={{ width: `${resumo.numeros.salvos ? Math.max(3, (valor / resumo.numeros.salvos) * 100) : 0}%` }}
+                          />
+                        </div>
+                        <span className="funil-valor">{valor}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {uso ? (
+                  <p className="ajuda" style={{ marginBottom: 0, marginTop: 16 }}>
+                    {uso.buscas_restantes} de {uso.buscas_limite} buscas restantes neste mês.
+                  </p>
+                ) : null}
+              </section>
+            ) : null}
+
             {!resumo ? (
               <section className="painel estado"><div className="spinner" /><p>Carregando seu dia.</p></section>
             ) : pendencias === 0 && resumo.favoritos_sem_contato.length === 0 ? (
@@ -1232,6 +1380,149 @@ function App() {
               })()}
             </section>
           </>
+        ) : aba === 'plano' ? (
+          <>
+            <section className="painel">
+              <h2>Seu plano</h2>
+              {!assinatura ? (
+                <p className="ajuda">Carregando.</p>
+              ) : (
+                <>
+                  <div className="plano-atual">
+                    <div>
+                      <p className="plano-nome">{assinatura.plano_nome}</p>
+                      <p className="ajuda" style={{ marginBottom: 0 }}>
+                        {assinatura.status === 'teste' ? 'Período de teste' : null}
+                        {assinatura.status === 'ativa' ? 'Assinatura ativa' : null}
+                        {assinatura.vencida ? 'Vencida' : null}
+                        {assinatura.expira_em ? ` · até ${formatarData(assinatura.expira_em)}` : ''}
+                      </p>
+                    </div>
+                  </div>
+
+                  {uso ? (
+                    <>
+                      <div className="medidor">
+                        <div className="medidor-topo">
+                          <span>Buscas no mês</span>
+                          <span>{uso.buscas} de {uso.buscas_limite}</span>
+                        </div>
+                        <div className="barra">
+                          <div className="barra-fill" style={{ width: `${Math.min(100, (uso.buscas / uso.buscas_limite) * 100)}%` }} />
+                        </div>
+                      </div>
+                      <div className="medidor">
+                        <div className="medidor-topo">
+                          <span>Análises no mês</span>
+                          <span>{uso.analises} de {uso.analises_limite}</span>
+                        </div>
+                        <div className="barra">
+                          <div className="barra-fill" style={{ width: `${Math.min(100, (uso.analises / uso.analises_limite) * 100)}%` }} />
+                        </div>
+                      </div>
+                      <p className="ajuda">A cota volta a zerar no dia 1. Resultado que vem do cache não consome nada.</p>
+                    </>
+                  ) : null}
+                </>
+              )}
+            </section>
+
+            {catalogo ? (
+              <section className="painel">
+                <h2>Planos</h2>
+                <p className="ajuda">
+                  {catalogo.pagamento_ligado
+                    ? 'Escolha o plano e siga para o pagamento.'
+                    : 'O pagamento ainda não está conectado. Os limites já valem; a cobrança entra depois.'}
+                </p>
+                <div className="planos-grade">
+                  {catalogo.planos.map((p) => (
+                    <div className={`plano-card ${assinatura && assinatura.plano === p.id ? 'plano-card-atual' : ''}`} key={p.id}>
+                      <p className="plano-card-nome">{p.nome}</p>
+                      <p className="plano-card-preco">
+                        {p.preco === 0 ? 'Grátis' : `R$ ${p.preco.toLocaleString('pt-BR')}`}
+                        {p.preco > 0 ? <span className="plano-card-mes">/mês</span> : null}
+                      </p>
+                      <p className="plano-card-desc">{p.descricao}</p>
+                      <ul className="plano-lista">
+                        <li>{p.buscas_mes} buscas por mês</li>
+                        <li>{p.analises_mes} análises de preço</li>
+                        <li>{p.alertas} busca(s) agendada(s)</li>
+                        <li>{p.contas} conta(s) de corretor</li>
+                      </ul>
+                      {assinatura && assinatura.plano === p.id ? (
+                        <span className="plano-selo">Plano atual</span>
+                      ) : p.preco > 0 ? (
+                        <button className="btn btn-principal btn-bloco" onClick={() => assinarPlano(p.id)}>
+                          Assinar
+                        </button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {equipe ? (
+              <section className="painel">
+                <h2>Corretores da conta</h2>
+                <p className="ajuda">
+                  {equipe.usadas} de {equipe.limite_contas} conta(s) em uso. Todos compartilham a mesma
+                  cota mensal e a mesma carteira.
+                </p>
+
+                {equipe.membros.length > 0 ? (
+                  <div className="lista-membros">
+                    {equipe.membros.map((m) => (
+                      <div className="pendencia" key={m.id}>
+                        <div className="pendencia-info">
+                          <span className="pendencia-titulo">{m.nome_imobiliaria}</span>
+                          <span className="pendencia-meta">{m.email}</span>
+                        </div>
+                        {equipe.eh_dono ? (
+                          <div className="pendencia-acoes">
+                            <button className="btn btn-texto btn-perigo" onClick={() => removerMembro(m.id)}>Remover</button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="ajuda">Nenhum corretor adicionado além de você.</p>
+                )}
+
+                {equipe.eh_dono && equipe.usadas < equipe.limite_contas ? (
+                  <form onSubmit={adicionarMembro} className="form-carteira">
+                    <div className="grid grid-2">
+                      <label>
+                        <span>Nome do corretor</span>
+                        <input type="text" value={formMembro.nome}
+                          onChange={(e) => setFormMembro({ ...formMembro, nome: e.target.value })} required />
+                      </label>
+                      <label>
+                        <span>Email</span>
+                        <input type="email" value={formMembro.email}
+                          onChange={(e) => setFormMembro({ ...formMembro, email: e.target.value })} required />
+                      </label>
+                    </div>
+                    <label className="campo-largo">
+                      <span>Senha provisória</span>
+                      <input type="text" value={formMembro.senha}
+                        onChange={(e) => setFormMembro({ ...formMembro, senha: e.target.value })}
+                        placeholder="mínimo 8 caracteres" required />
+                    </label>
+                    <button type="submit" className="btn btn-principal" disabled={salvandoMembro}>
+                      {salvandoMembro ? 'Adicionando...' : 'Adicionar corretor'}
+                    </button>
+                  </form>
+                ) : null}
+
+                {equipe.eh_dono && equipe.usadas >= equipe.limite_contas ? (
+                  <p className="ajuda">Limite de contas do plano atingido. Mude de plano para adicionar mais corretores.</p>
+                ) : null}
+              </section>
+            ) : null}
+          </>
         ) : aba === 'perfil' ? (
           <>
           <section className="painel">
@@ -1264,10 +1555,13 @@ function App() {
               Só avisa quando tem novidade de verdade — a primeira execução nunca dispara aviso.
             </p>
 
-            {!notificacoes.email_ligado ? (
+            {notificacoes.email_ligado === false ? (
               <div className="alerta alerta-info" style={{ margin: '0 0 16px' }}>
-                O envio de email ainda não está configurado no servidor. A opção fica salva e passa a
-                valer assim que o SMTP for ligado.
+                O envio de email ainda não está configurado no servidor. Falta definir as variáveis
+                <strong> SMTP_HOST</strong>, <strong>SMTP_PORT</strong>, <strong>SMTP_USER</strong>,
+                <strong> SMTP_PASS</strong> e <strong>SMTP_FROM</strong> no Railway, usando uma conta
+                de email do domínio na Hostinger. A preferência abaixo fica salva e passa a valer
+                assim que isso for feito.
               </div>
             ) : null}
 
