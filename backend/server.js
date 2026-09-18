@@ -30,6 +30,7 @@ const client = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
 // Inteiros validados aqui porque alguns vão direto no SQL (nunca vêm do usuário).
 const CACHE_HORAS = inteiroEntre(process.env.CACHE_HORAS, 6, 1, 168);
+const ANALISE_CACHE_HORAS = inteiroEntre(process.env.ANALISE_CACHE_HORAS, 24, 1, 168);
 const LIMITE_BUSCAS_DIA = inteiroEntre(process.env.LIMITE_BUSCAS_DIA, 40, 1, 1000);
 const LIMITE_ANALISES_DIA = inteiroEntre(process.env.LIMITE_ANALISES_DIA, 60, 1, 1000);
 const CODIGO_CONVITE = process.env.CODIGO_CONVITE || '';
@@ -139,6 +140,16 @@ async function prepararBanco() {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS analises_cache (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        chave CHAR(64) NOT NULL,
+        resultado LONGTEXT NOT NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_analise_chave_data (chave, criado_em)
+      )
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS historico_buscas (
         id INT AUTO_INCREMENT PRIMARY KEY,
         usuario_id INT NOT NULL,
@@ -157,6 +168,7 @@ async function prepararBanco() {
     }
 
     await pool.query('DELETE FROM buscas_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
+    await pool.query('DELETE FROM analises_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
     console.log(`Banco pronto. Cache: ${CACHE_HORAS}h. Teto: ${LIMITE_BUSCAS_DIA} buscas/dia.`);
   } catch (error) {
     console.error('Falha ao preparar o banco:', error.message);
@@ -572,21 +584,19 @@ app.post('/api/imoveis/:id/analisar', autenticar, async (req, res) => {
     const [rows] = await pool.query('SELECT * FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
 
-    const temCota = await consumirCota(req.usuario.id, 'analises', LIMITE_ANALISES_DIA);
-    if (!temCota) return res.status(429).json({ erro: `Limite de ${LIMITE_ANALISES_DIA} análises por dia atingido.` });
-
     const im = rows[0];
-    const resposta = await analisarPreco({
+    const r = await obterAnalise(req.usuario.id, {
       titulo: im.titulo, preco: im.preco, bairro: im.bairro, tipo: im.tipo,
       quartos: im.quartos, banheiros: im.banheiros, area_m2: im.area_m2, descricao: im.descricao,
     });
+    if (!r.ok) return res.status(r.status).json({ erro: r.erro });
 
     await pool.query(
       'INSERT INTO analises_ia (imovel_id, resumo, score, preco_sugestao) VALUES (?, ?, ?, ?)',
-      [req.params.id, resposta.resumo, resposta.score, resposta.preco_sugestao]
+      [req.params.id, r.resposta.resumo, r.resposta.score, r.resposta.preco_sugestao]
     );
 
-    res.json(resposta);
+    res.json(r.resposta);
   } catch (error) { falhou(res, 'analisar imovel', error); }
 });
 
@@ -648,17 +658,59 @@ Ao final, responda APENAS com um bloco JSON (sem texto antes ou depois, sem mark
   return extrairJSON(textoCompleto);
 }
 
+// O mesmo imóvel analisado duas vezes no mesmo dia dá o mesmo parecer.
+// Não faz sentido pagar de novo por isso.
+function chaveDaAnalise(im) {
+  const base = [im.titulo, im.preco, im.bairro, im.tipo, im.quartos, im.banheiros, im.area_m2]
+    .map(normalizar)
+    .join('|');
+  return crypto.createHash('sha256').update(base).digest('hex');
+}
+
+// Ordem que importa: cache primeiro, cota depois, IA por último.
+// Assim resultado guardado nunca consome a cota diária do corretor.
+async function obterAnalise(usuarioId, im) {
+  const chave = chaveDaAnalise(im);
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT resultado, criado_em FROM analises_cache
+       WHERE chave = ? AND criado_em > (NOW() - INTERVAL ${ANALISE_CACHE_HORAS} HOUR)
+       ORDER BY criado_em DESC LIMIT 1`,
+      [chave]
+    );
+    if (rows.length > 0) {
+      return { ok: true, resposta: { ...JSON.parse(rows[0].resultado), do_cache: true, analisado_em: rows[0].criado_em } };
+    }
+  } catch (error) {
+    console.error('Falha ao ler cache de analise (seguindo sem ele):', error.message);
+  }
+
+  const temCota = await consumirCota(usuarioId, 'analises', LIMITE_ANALISES_DIA);
+  if (!temCota) {
+    return { ok: false, status: 429, erro: `Limite de ${LIMITE_ANALISES_DIA} análises por dia atingido.` };
+  }
+
+  const resposta = await analisarPreco(im);
+
+  try {
+    await pool.query('INSERT INTO analises_cache (chave, resultado) VALUES (?, ?)', [chave, JSON.stringify(resposta)]);
+  } catch (error) {
+    console.error('Falha ao gravar cache de analise (resultado foi entregue):', error.message);
+  }
+
+  return { ok: true, resposta: { ...resposta, do_cache: false, analisado_em: new Date() } };
+}
+
 // Análise avulsa: recebe os dados direto no corpo, sem precisar estar salvo no banco
 app.post('/api/analisar-avulso', autenticar, async (req, res) => {
   try {
     const { titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao } = req.body;
     if (!titulo || !preco || !bairro) return res.status(400).json({ erro: 'Dados insuficientes para análise' });
 
-    const temCota = await consumirCota(req.usuario.id, 'analises', LIMITE_ANALISES_DIA);
-    if (!temCota) return res.status(429).json({ erro: `Limite de ${LIMITE_ANALISES_DIA} análises por dia atingido.` });
-
-    const resposta = await analisarPreco({ titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao });
-    res.json(resposta);
+    const r = await obterAnalise(req.usuario.id, { titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao });
+    if (!r.ok) return res.status(r.status).json({ erro: r.erro });
+    res.json(r.resposta);
   } catch (error) { falhou(res, 'analise avulsa', error); }
 });
 
