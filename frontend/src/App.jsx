@@ -611,14 +611,6 @@ function App() {
     if (sessao && aba === 'carteira') carregarCarteira();
   }, [sessao, aba, carregarCarteira]);
 
-  useEffect(() => {
-    if (!sessao) return;
-    carregarSalvos();
-    carregarHistorico();
-    carregarAlertas();
-    carregarResumo();
-    setImobiliaria(sessao.usuario?.nome_imobiliaria || '');
-  }, [sessao, carregarSalvos, carregarHistorico, carregarAlertas, carregarResumo]);
 
   // Contador de tempo da busca. Espera de 40 segundos sem sinal nenhum parece travamento.
   useEffect(() => {
@@ -710,6 +702,16 @@ function App() {
       if (error?.response?.status === 401) sair();
     }
   }, [sair]);
+
+  // Precisa ficar depois das funções que ele chama: const não sobe como function.
+  useEffect(() => {
+    if (!sessao) return;
+    carregarSalvos();
+    carregarHistorico();
+    carregarAlertas();
+    carregarResumo();
+    setImobiliaria(sessao.usuario?.nome_imobiliaria || '');
+  }, [sessao, carregarSalvos, carregarHistorico, carregarAlertas, carregarResumo]);
 
   const agendarBuscaAtual = async () => {
     if (!formBusca.bairro.trim()) {
