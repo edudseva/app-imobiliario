@@ -78,6 +78,30 @@ const quandoFoi = (data) => {
   return `há ${horas}h`;
 };
 
+// Só para exibir no texto de ajuda; quem manda de verdade é o backend.
+const LIMITE_ALERTAS_VISIVEL = 5;
+
+const ROTULOS_CRITERIOS = {
+  cidade: 'Cidade',
+  tipo: 'Tipo',
+  preco_min: 'A partir de R$',
+  preco_max: 'Até R$',
+  quartos_min: 'Quartos',
+  banheiros_min: 'Banheiros',
+  vagas_min: 'Vagas',
+  area_min: 'Área mín',
+  area_max: 'Área máx',
+  detalhes: 'Detalhes',
+};
+
+const resumoCriterios = (c) => {
+  const partes = [c.bairro];
+  Object.entries(ROTULOS_CRITERIOS).forEach(([campo, rotulo]) => {
+    if (c[campo]) partes.push(`${rotulo}: ${c[campo]}`);
+  });
+  return partes.filter(Boolean).join(' · ');
+};
+
 const FORM_BUSCA_INICIAL = {
   cidade: '', bairro: '', tipo: '', preco_min: '', preco_max: '',
   quartos_min: '', banheiros_min: '', vagas_min: '', area_min: '', area_max: '', detalhes: '',
@@ -396,6 +420,11 @@ function App() {
   const [historico, setHistorico] = useState([]);
   const [filtroSalvos, setFiltroSalvos] = useState('todos');
 
+  const [alertas, setAlertas] = useState([]);
+  const [rodando, setRodando] = useState({});
+  const [imobiliaria, setImobiliaria] = useState(sessao?.usuario?.nome_imobiliaria || '');
+  const [salvandoImobiliaria, setSalvandoImobiliaria] = useState(false);
+
   const aviso = (texto, tipo = 'info') => {
     setMensagem({ texto, tipo });
     if (tipo !== 'erro') setTimeout(() => setMensagem(null), 5000);
@@ -549,7 +578,9 @@ function App() {
     if (!sessao) return;
     carregarSalvos();
     carregarHistorico();
-  }, [sessao, carregarSalvos, carregarHistorico]);
+    carregarAlertas();
+    setImobiliaria(sessao.usuario?.nome_imobiliaria || '');
+  }, [sessao, carregarSalvos, carregarHistorico, carregarAlertas]);
 
   // Contador de tempo da busca. Espera de 40 segundos sem sinal nenhum parece travamento.
   useEffect(() => {
@@ -606,6 +637,93 @@ function App() {
     aviso('Perfil salvo neste navegador', 'sucesso');
   };
 
+  const salvarImobiliaria = async (e) => {
+    e.preventDefault();
+    setSalvandoImobiliaria(true);
+    try {
+      const res = await api.put('/auth/perfil', { nome_imobiliaria: imobiliaria });
+      // O nome vai dentro do token, então a sessão inteira é trocada.
+      gravarLocal(CHAVE_SESSAO, res.data);
+      setSessao(res.data);
+      aviso('Imobiliária atualizada', 'sucesso');
+    } catch (error) {
+      tratarErro(error, 'Não foi possível salvar a imobiliária');
+    } finally {
+      setSalvandoImobiliaria(false);
+    }
+  };
+
+  // ===== Alertas =====
+
+  const carregarAlertas = useCallback(async () => {
+    try {
+      const res = await api.get('/alertas');
+      setAlertas(res.data || []);
+    } catch (error) {
+      if (error?.response?.status === 401) sair();
+    }
+  }, [sair]);
+
+  const agendarBuscaAtual = async () => {
+    if (!formBusca.bairro.trim()) {
+      aviso('Preencha ao menos o bairro antes de agendar', 'erro');
+      return;
+    }
+    const criterios = Object.fromEntries(
+      Object.entries(formBusca).filter(([, v]) => String(v).trim() !== '')
+    );
+    try {
+      await api.post('/alertas', { criterios, hora: 7 });
+      aviso('Busca agendada. Roda todo dia às 07:00 enquanto estiver ativa.', 'sucesso');
+      await carregarAlertas();
+      setAba('alertas');
+    } catch (error) {
+      tratarErro(error, 'Não foi possível agendar');
+    }
+  };
+
+  const alterarAlerta = async (id, mudancas) => {
+    try {
+      const res = await api.put(`/alertas/${id}`, mudancas);
+      setAlertas((lista) => lista.map((a) => (a.id === id ? res.data : a)));
+    } catch (error) {
+      tratarErro(error, 'Não foi possível alterar o alerta');
+    }
+  };
+
+  const removerAlerta = async (id) => {
+    if (!window.confirm('Remover esta busca agendada?')) return;
+    try {
+      await api.delete(`/alertas/${id}`);
+      setAlertas((lista) => lista.filter((a) => a.id !== id));
+    } catch (error) {
+      tratarErro(error, 'Não foi possível remover');
+    }
+  };
+
+  const rodarAlertaAgora = async (id) => {
+    setRodando((r) => ({ ...r, [id]: true }));
+    try {
+      const res = await api.post(`/alertas/${id}/rodar`);
+      setAlertas((lista) => lista.map((a) => (a.id === id ? res.data : a)));
+      carregarUso();
+    } catch (error) {
+      tratarErro(error, 'Não foi possível rodar agora');
+    } finally {
+      setRodando((r) => ({ ...r, [id]: false }));
+    }
+  };
+
+  // Joga o resultado guardado do alerta na tela de busca, sem gastar nada.
+  const verResultadoAlerta = (alerta) => {
+    setFormBusca({ ...FORM_BUSCA_INICIAL, ...alerta.criterios });
+    setResultados(alerta.ultimo_resultado);
+    setInfoCache({ do_cache: true, buscado_em: alerta.ultima_execucao });
+    setAnalises({});
+    setContatoAberto(null);
+    setAba('buscar');
+  };
+
   const perfilPreenchido = Boolean(perfil.nome && perfil.telefone);
 
   const copiar = async (texto, rotulo, marcador) => {
@@ -637,6 +755,8 @@ function App() {
     executarBusca(false, alvo);
   };
 
+  const totalNovos = alertas.reduce((soma, a) => soma + (a.novos ? a.novos.length : 0), 0);
+
   if (!sessao) return <Login aoEntrar={entrar} />;
 
   return (
@@ -658,6 +778,9 @@ function App() {
             <button className={aba === 'buscar' ? 'ativa' : ''} onClick={() => setAba('buscar')}>Buscar imóveis</button>
             <button className={aba === 'salvos' ? 'ativa' : ''} onClick={() => setAba('salvos')}>
               Salvos{Object.keys(salvos).length ? ` (${Object.keys(salvos).length})` : ''}
+            </button>
+            <button className={aba === 'alertas' ? 'ativa' : ''} onClick={() => setAba('alertas')}>
+              Agendadas{totalNovos ? ` (${totalNovos} novos)` : ''}
             </button>
             <button className={aba === 'carteira' ? 'ativa' : ''} onClick={() => setAba('carteira')}>Minha carteira</button>
             <button className={aba === 'perfil' ? 'ativa' : ''} onClick={() => setAba('perfil')}>Meu perfil</button>
@@ -753,6 +876,10 @@ function App() {
                 <div className="acoes-form">
                   <button type="submit" className="btn btn-principal" disabled={buscando}>
                     {buscando ? 'Buscando nos portais...' : 'Buscar imóveis'}
+                  </button>
+                  <button type="button" className="btn btn-secundario" disabled={buscando}
+                    onClick={agendarBuscaAtual}>
+                    Agendar esta busca
                   </button>
                   <button type="button" className="btn btn-texto" disabled={buscando}
                     onClick={() => { setFormBusca(FORM_BUSCA_INICIAL); setResultados(null); setInfoCache(null); }}>
@@ -944,6 +1071,30 @@ function App() {
             </section>
           </>
         ) : aba === 'perfil' ? (
+          <>
+          <section className="painel">
+            <h2>Imobiliária</h2>
+            <p className="ajuda">
+              Fica salvo na sua conta, não só neste navegador. Trocar aqui não apaga nada:
+              carteira, salvos e alertas continuam seus.
+            </p>
+            <form onSubmit={salvarImobiliaria}>
+              <label className="campo-largo">
+                <span>Nome da imobiliária</span>
+                <input
+                  type="text"
+                  value={imobiliaria}
+                  onChange={(e) => setImobiliaria(e.target.value)}
+                  placeholder="Ex: Aguiar de Vasconcelos"
+                  required
+                />
+              </label>
+              <button type="submit" className="btn btn-principal" disabled={salvandoImobiliaria}>
+                {salvandoImobiliaria ? 'Salvando...' : 'Salvar imobiliária'}
+              </button>
+            </form>
+          </section>
+
           <section className="painel">
             <h2>Meu perfil</h2>
             <p className="ajuda">
@@ -980,6 +1131,108 @@ function App() {
               <button type="submit" className="btn btn-principal">Salvar perfil</button>
             </form>
           </section>
+          </>
+        ) : aba === 'alertas' ? (
+          <>
+            <section className="painel">
+              <h2>Buscas agendadas</h2>
+              <p className="ajuda">
+                Cada alerta é uma busca sua que roda uma vez por dia, no horário que você escolher,
+                e compara com o resultado do dia anterior para mostrar o que apareceu de novo.
+                Alerta desativado não roda e não gasta nada.
+              </p>
+              <p className="ajuda">
+                Para criar: monte a busca na aba <strong>Buscar imóveis</strong> e clique em
+                "Agendar esta busca". Seu limite é de {LIMITE_ALERTAS_VISIVEL} alertas.
+              </p>
+            </section>
+
+            <section className="resultados">
+              {alertas.length === 0 ? (
+                <div className="painel estado">
+                  <p>Nenhuma busca agendada ainda.</p>
+                </div>
+              ) : (
+                <div className="lista-alertas">
+                  {alertas.map((al) => (
+                    <article className={`painel alerta-card ${al.ativo ? '' : 'alerta-inativo'}`} key={al.id}>
+                      <div className="alerta-topo">
+                        <div>
+                          <h3>{al.nome}</h3>
+                          <p className="alerta-criterios">{resumoCriterios(al.criterios)}</p>
+                        </div>
+                        <label className="interruptor">
+                          <input
+                            type="checkbox"
+                            checked={al.ativo}
+                            onChange={(e) => alterarAlerta(al.id, { ativo: e.target.checked })}
+                          />
+                          <span>{al.ativo ? 'Ativo' : 'Pausado'}</span>
+                        </label>
+                      </div>
+
+                      <div className="alerta-linha">
+                        <label className="alerta-hora">
+                          <span>Roda às</span>
+                          <select
+                            className="status-select"
+                            value={al.hora}
+                            onChange={(e) => alterarAlerta(al.id, { hora: Number(e.target.value) })}
+                          >
+                            {Array.from({ length: 24 }, (_, h) => (
+                              <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>
+                            ))}
+                          </select>
+                        </label>
+                        <span className="marca-tempo">
+                          {al.ultima_execucao ? `Última vez ${quandoFoi(al.ultima_execucao)}` : 'Ainda não rodou'}
+                        </span>
+                      </div>
+
+                      {al.erro ? <p className="alerta-erro-txt">Última tentativa falhou: {al.erro}</p> : null}
+
+                      {al.novos.length > 0 ? (
+                        <div className="bloco-novos">
+                          <p className="bloco-titulo">{al.novos.length} novo(s) desde a última vez</p>
+                          {al.novos.slice(0, 5).map((a, i) => (
+                            <div className="novo-item" key={a.link || i}>
+                              <span className="novo-titulo">{a.titulo}</span>
+                              <span className="novo-preco">{formatarPreco(a.preco)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+
+                      {al.sumidos.length > 0 ? (
+                        <p className="marca-tempo">
+                          {al.sumidos.length} anúncio(s) sumiram do portal desde a última vez.
+                          Costuma ser venda fechada ou anúncio retirado.
+                        </p>
+                      ) : null}
+
+                      <div className="card-acoes">
+                        <button
+                          className="btn btn-secundario"
+                          onClick={() => rodarAlertaAgora(al.id)}
+                          disabled={rodando[al.id]}
+                        >
+                          {rodando[al.id] ? 'Rodando...' : 'Rodar agora'}
+                        </button>
+                        {al.ultimo_resultado.length > 0 ? (
+                          <button className="btn btn-texto" onClick={() => verResultadoAlerta(al)}>
+                            Ver {al.ultimo_resultado.length} resultado(s)
+                          </button>
+                        ) : null}
+                        <button className="btn btn-texto btn-perigo" onClick={() => removerAlerta(al.id)}>
+                          Remover
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
         ) : (
           <>
             <section className="painel">
