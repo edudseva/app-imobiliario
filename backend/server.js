@@ -1099,6 +1099,24 @@ app.get('/api/resumo', autenticar, async (req, res) => {
 
     const usoMes = await lerUso(req.conta.id);
 
+    // Números do funil: favoritou, contatou, responderam, fecharam parceria.
+    const [numeros] = await pool.query(
+      `SELECT
+         COUNT(*) AS salvos,
+         SUM(favorito = TRUE) AS favoritos,
+         SUM(status IS NOT NULL) AS contatados,
+         SUM(status IN ('respondeu','aceita_parceria','recusou')) AS responderam,
+         SUM(status = 'aceita_parceria') AS parcerias
+       FROM anuncios_salvos WHERE usuario_id = ?`,
+      [id]
+    );
+    const n = numeros[0] || {};
+
+    const [alertasTotais] = await pool.query(
+      'SELECT COUNT(*) AS total, SUM(ativo = TRUE) AS ativos FROM alertas WHERE usuario_id = ?',
+      [id]
+    );
+
     const novosPorAlerta = alertasAtivos
       .map((a) => ({
         id: a.id,
@@ -1118,6 +1136,15 @@ app.get('/api/resumo', autenticar, async (req, res) => {
       dias_sem_resposta: DIAS_SEM_RESPOSTA,
       dias_parceria_parada: DIAS_PARCERIA_PARADA,
       assinatura_vencida: req.conta.vencida,
+      numeros: {
+        salvos: Number(n.salvos || 0),
+        favoritos: Number(n.favoritos || 0),
+        contatados: Number(n.contatados || 0),
+        responderam: Number(n.responderam || 0),
+        parcerias: Number(n.parcerias || 0),
+        alertas_total: Number(alertasTotais[0] ? alertasTotais[0].total : 0),
+        alertas_ativos_n: Number(alertasTotais[0] ? alertasTotais[0].ativos || 0 : 0),
+      },
       uso_mes: {
         buscas: usoMes.buscas,
         buscas_restantes: Math.max(req.conta.limites.buscas_mes - usoMes.buscas, 0),
