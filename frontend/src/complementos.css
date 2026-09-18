@@ -1,90 +1,39 @@
-/* Estilos das telas novas: login, cota diária e indicador de cache.
-   Ficam separados do App.css para não misturar com o layout já validado. */
+/* Telas de login, favoritos, situação do contato e buscas recentes.
+   Usa os tokens definidos no App.css. */
+
+/* ===== Login ===== */
 
 .tela-login {
   min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background: linear-gradient(135deg, #f4f7fa 0%, #e8eef6 100%);
+  padding: 20px 16px;
+  background: var(--fundo);
 }
 
 .caixa-login {
   width: 100%;
-  max-width: 420px;
-  background: var(--branco);
+  max-width: 400px;
+  background: var(--superficie);
   border: 1px solid var(--linha);
   border-radius: var(--raio);
-  padding: 32px;
-  box-shadow: var(--sombra);
+  padding: 28px 22px;
 }
 
 .marca-login {
-  margin-bottom: 26px;
+  margin-bottom: 24px;
 }
 
 .caixa-login .alerta {
-  margin: 0 0 18px;
+  margin: 0 0 16px;
 }
 
 .caixa-login label {
   margin-bottom: 16px;
 }
 
-.btn-bloco {
-  width: 100%;
-  margin-top: 4px;
-}
-
-.topo-direita {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
-.cota {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--azul);
-  background: var(--azul-claro);
-  padding: 5px 10px;
-  border-radius: 20px;
-  white-space: nowrap;
-}
-
-.frescor {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.frescor .btn-texto {
-  padding: 4px 8px;
-  font-size: 13px;
-}
-
-@media (max-width: 720px) {
-  .caixa-login {
-    padding: 24px 20px;
-  }
-
-  .topo-direita {
-    width: 100%;
-    margin-left: 0;
-    margin-top: 10px;
-    justify-content: space-between;
-  }
-
-  .marca {
-    flex-wrap: wrap;
-  }
-}
-
-/* Favoritos, situação do contato e buscas recentes */
+/* ===== Favoritos e situação do contato ===== */
 
 .card-canto {
   display: flex;
@@ -96,16 +45,20 @@
 .estrela {
   background: none;
   border: none;
-  padding: 0 2px;
-  font-size: 20px;
+  min-width: var(--toque);
+  min-height: var(--toque);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
   line-height: 1;
   cursor: pointer;
-  color: var(--tinta-fraca);
+  color: var(--texto-fraco);
   transition: color 0.15s, transform 0.15s;
 }
 
 .estrela:hover {
-  transform: scale(1.15);
+  transform: scale(1.12);
   color: var(--ambar);
 }
 
@@ -121,34 +74,35 @@
 }
 
 .status-rotulo {
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: 10.5px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--tinta-fraca);
+  letter-spacing: 0.6px;
+  color: var(--texto-fraco);
   flex-shrink: 0;
 }
 
 .status-select {
-  padding: 6px 10px;
-  font-size: 13px;
-  border-radius: 6px;
-  width: auto;
   flex: 1;
+  min-height: 38px;
+  padding: 8px 32px 8px 10px;
+  font-size: 13px;
 }
 
 .marca-tempo {
-  font-size: 12.5px;
-  color: var(--tinta-fraca);
+  font-size: 12px;
+  color: var(--texto-fraco);
   margin-bottom: 12px;
 }
 
-/* A borda esquerda do card conta a situação sem precisar ler nada */
+/* A borda esquerda conta a situação sem precisar ler nada */
 .card-contatado { border-left-color: var(--ambar); }
-.card-respondeu { border-left-color: var(--azul); }
+.card-respondeu { border-left-color: var(--azul-info); }
 .card-aceita_parceria { border-left-color: var(--verde); }
 .card-recusou { border-left-color: var(--vermelho); }
-.card-sem_resposta { border-left-color: var(--tinta-fraca); }
+.card-sem_resposta { border-left-color: var(--texto-fraco); }
+
+/* ===== Chips: buscas recentes e filtros ===== */
 
 .historico,
 .filtros-chips {
@@ -157,68 +111,66 @@
   gap: 8px;
 }
 
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border: 1px solid var(--linha);
-  border-radius: 20px;
-  background: var(--branco);
-  font-size: 13px;
-  font-family: inherit;
-  color: var(--tinta);
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-
-.chip:hover {
-  border-color: var(--azul);
-}
-
-.chip-texto {
-  font-weight: 550;
-  text-transform: capitalize;
-}
-
-.chip-meta {
-  font-size: 11.5px;
-  color: var(--tinta-fraca);
-}
-
-.chip-ativo {
-  background: var(--azul);
-  border-color: var(--azul);
-  color: var(--branco);
-}
-
-.chip-ativo:hover {
-  border-color: var(--azul-escuro);
-}
-
 .filtros-chips {
   margin-top: 4px;
 }
 
-/* Espera da busca: mostrar o tempo correndo evita a sensação de travamento */
-
-.contador {
-  font-size: 26px;
-  font-weight: 680;
-  color: var(--azul);
-  margin: 10px 0 6px;
-  font-variant-numeric: tabular-nums;
-}
-
-.ajuda-espera {
-  max-width: 460px;
-  margin: 0 auto;
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 14px;
+  border: 1px solid var(--linha);
+  border-radius: 20px;
+  background: var(--superficie-2);
   font-size: 13px;
-  line-height: 1.55;
-  color: var(--tinta-fraca);
+  font-family: inherit;
+  color: var(--texto-suave);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
+
+.chip:hover {
+  border-color: var(--linha-forte);
+  color: var(--texto);
+}
+
+.chip-texto {
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.chip-meta {
+  font-size: 11px;
+  color: var(--texto-fraco);
+}
+
+.chip-ativo {
+  background: var(--acento);
+  border-color: var(--acento);
+  color: #ffffff;
+}
+
+.chip-ativo .chip-meta {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.chip-ativo:hover {
+  background: var(--acento-escuro);
+  border-color: var(--acento-escuro);
+  color: #ffffff;
+}
+
+/* ===== Selo de resultado salvo ===== */
 
 .selo-cache {
-  color: var(--tinta-fraca);
+  color: var(--texto-fraco);
   font-style: italic;
+}
+
+@media (min-width: 720px) {
+  .caixa-login {
+    padding: 32px;
+  }
 }
