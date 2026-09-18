@@ -113,6 +113,42 @@ async function prepararBanco() {
       )
     `);
 
+    // Anúncios que o corretor marcou: favorito, contato feito e o que deu.
+    // Guarda uma cópia dos dados porque o anúncio some do portal quando vende.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS anuncios_salvos (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        usuario_id INT NOT NULL,
+        chave CHAR(64) NOT NULL,
+        titulo VARCHAR(400),
+        link VARCHAR(900),
+        site_origem VARCHAR(120),
+        preco DECIMAL(12,2) NULL,
+        bairro VARCHAR(150),
+        cidade VARCHAR(150),
+        dados LONGTEXT,
+        favorito BOOLEAN NOT NULL DEFAULT FALSE,
+        status VARCHAR(20) NULL,
+        observacao TEXT,
+        contatado_em TIMESTAMP NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_usuario_anuncio (usuario_id, chave),
+        INDEX idx_salvos_usuario (usuario_id, favorito)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS historico_buscas (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        usuario_id INT NOT NULL,
+        criterios TEXT NOT NULL,
+        resultados INT NOT NULL DEFAULT 0,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_historico_usuario (usuario_id, criado_em)
+      )
+    `);
+
     // A carteira precisa ter dono, senão uma imobiliária enxerga a da outra.
     if (!(await colunaExiste('imoveis', 'usuario_id'))) {
       await pool.query('ALTER TABLE imoveis ADD COLUMN usuario_id INT NULL');
@@ -361,6 +397,129 @@ async function gravarNoCache(chave, criterios, anuncios) {
   }
 }
 
+// ============ ANÚNCIOS SALVOS E HISTÓRICO ============
+
+// Identidade do anúncio. O link é o melhor identificador; sem ele, título + portal.
+function chaveDoAnuncio(anuncio) {
+  const base = anuncio.link
+    ? normalizar(anuncio.link)
+    : `${normalizar(anuncio.site_origem)}|${normalizar(anuncio.titulo)}`;
+  return crypto.createHash('sha256').update(base).digest('hex');
+}
+
+const STATUS_VALIDOS = ['contatado', 'respondeu', 'aceita_parceria', 'recusou', 'sem_resposta'];
+
+app.get('/api/salvos', autenticar, async (req, res) => {
+  try {
+    let query = 'SELECT * FROM anuncios_salvos WHERE usuario_id = ?';
+    const params = [req.usuario.id];
+    if (req.query.favorito === '1') query += ' AND favorito = TRUE';
+    if (req.query.status && STATUS_VALIDOS.includes(req.query.status)) {
+      query += ' AND status = ?';
+      params.push(req.query.status);
+    }
+    query += ' ORDER BY atualizado_em DESC LIMIT 200';
+
+    const [rows] = await pool.query(query, params);
+    res.json(rows.map((r) => ({ ...r, dados: r.dados ? JSON.parse(r.dados) : null })));
+  } catch (error) { falhou(res, 'listar salvos', error); }
+});
+
+// Cria ou atualiza. Só mexe no que veio no corpo, o resto fica como estava.
+app.post('/api/salvos', autenticar, async (req, res) => {
+  try {
+    const { anuncio, favorito, status, observacao } = req.body;
+    if (!anuncio || (!anuncio.titulo && !anuncio.link)) {
+      return res.status(400).json({ erro: 'Anúncio inválido' });
+    }
+    if (status !== undefined && status !== null && !STATUS_VALIDOS.includes(status)) {
+      return res.status(400).json({ erro: 'Status inválido' });
+    }
+
+    const chave = chaveDoAnuncio(anuncio);
+    const contatouAgora = status === 'contatado' ? 'NOW()' : 'contatado_em';
+
+    await pool.query(
+      `INSERT INTO anuncios_salvos
+         (usuario_id, chave, titulo, link, site_origem, preco, bairro, cidade, dados, favorito, status, observacao, contatado_em)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${status === 'contatado' ? 'NOW()' : 'NULL'})
+       ON DUPLICATE KEY UPDATE
+         dados = VALUES(dados),
+         preco = VALUES(preco),
+         favorito = ${favorito === undefined ? 'favorito' : 'VALUES(favorito)'},
+         status = ${status === undefined ? 'status' : 'VALUES(status)'},
+         observacao = ${observacao === undefined ? 'observacao' : 'VALUES(observacao)'},
+         contatado_em = ${contatouAgora}`,
+      [
+        req.usuario.id,
+        chave,
+        (anuncio.titulo || '').slice(0, 400),
+        (anuncio.link || '').slice(0, 900) || null,
+        (anuncio.site_origem || '').slice(0, 120),
+        anuncio.preco ? parseFloat(anuncio.preco) : null,
+        (anuncio.bairro || '').slice(0, 150),
+        (anuncio.cidade || '').slice(0, 150),
+        JSON.stringify(anuncio),
+        favorito === undefined ? false : Boolean(favorito),
+        status === undefined ? null : status,
+        observacao === undefined ? null : observacao,
+      ]
+    );
+
+    const [rows] = await pool.query(
+      'SELECT * FROM anuncios_salvos WHERE usuario_id = ? AND chave = ?',
+      [req.usuario.id, chave]
+    );
+    const salvo = rows[0];
+    res.json({ ...salvo, dados: salvo.dados ? JSON.parse(salvo.dados) : null });
+  } catch (error) { falhou(res, 'salvar anuncio', error); }
+});
+
+app.delete('/api/salvos/:chave', autenticar, async (req, res) => {
+  try {
+    const [result] = await pool.query(
+      'DELETE FROM anuncios_salvos WHERE usuario_id = ? AND chave = ?',
+      [req.usuario.id, req.params.chave]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ erro: 'Não encontrado' });
+    res.json({ ok: true });
+  } catch (error) { falhou(res, 'remover salvo', error); }
+});
+
+app.get('/api/historico', autenticar, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, criterios, resultados, criado_em FROM historico_buscas WHERE usuario_id = ? ORDER BY criado_em DESC LIMIT 15',
+      [req.usuario.id]
+    );
+    res.json(rows.map((r) => ({ ...r, criterios: JSON.parse(r.criterios) })));
+  } catch (error) { falhou(res, 'listar historico', error); }
+});
+
+async function registrarHistorico(usuarioId, criterios, resultados) {
+  try {
+    const limpos = Object.fromEntries(
+      Object.entries(criterios).filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+    );
+    await pool.query(
+      'INSERT INTO historico_buscas (usuario_id, criterios, resultados) VALUES (?, ?, ?)',
+      [usuarioId, JSON.stringify(limpos), resultados]
+    );
+    // Mantém só as 15 últimas por usuário.
+    await pool.query(
+      `DELETE FROM historico_buscas
+       WHERE usuario_id = ? AND id NOT IN (
+         SELECT id FROM (
+           SELECT id FROM historico_buscas WHERE usuario_id = ? ORDER BY criado_em DESC LIMIT 15
+         ) recentes
+       )`,
+      [usuarioId, usuarioId]
+    );
+  } catch (error) {
+    console.error('Falha ao registrar historico (busca foi entregue mesmo assim):', error.message);
+  }
+}
+
 // ============ CARTEIRA DE IMÓVEIS (do corretor logado) ============
 
 app.get('/api/imoveis', autenticar, async (req, res) => {
@@ -523,6 +682,7 @@ app.post('/api/buscar-anuncios', autenticar, async (req, res) => {
       const salvo = await lerDoCache(chave);
       if (salvo) {
         console.log(`Cache HIT ${chave.slice(0, 8)} (${bairro}), nenhuma chamada de IA`);
+        await registrarHistorico(req.usuario.id, criterios, salvo.anuncios.length);
         return res.json({ anuncios: salvo.anuncios, do_cache: true, buscado_em: salvo.buscado_em });
       }
     }
@@ -635,6 +795,7 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
     if (anuncios.length > 0) {
       await gravarNoCache(chave, criterios, anuncios);
     }
+    await registrarHistorico(req.usuario.id, criterios, anuncios.length);
 
     res.json({ anuncios, do_cache: false, buscado_em: new Date() });
   } catch (error) { falhou(res, 'buscar anuncios', error); }
