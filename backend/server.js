@@ -28,18 +28,19 @@ const client = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
 // ============ CONFIGURAÇÃO ============
 
-// Inteiros validados aqui porque alguns vão direto no SQL (nunca vêm do usuário).
-const CACHE_HORAS = inteiroEntre(process.env.CACHE_HORAS, 6, 1, 168);
-const ANALISE_CACHE_HORAS = inteiroEntre(process.env.ANALISE_CACHE_HORAS, 24, 1, 168);
-const LIMITE_BUSCAS_DIA = inteiroEntre(process.env.LIMITE_BUSCAS_DIA, 40, 1, 1000);
-const LIMITE_ANALISES_DIA = inteiroEntre(process.env.LIMITE_ANALISES_DIA, 60, 1, 1000);
-const CODIGO_CONVITE = process.env.CODIGO_CONVITE || '';
-
 function inteiroEntre(valor, padrao, minimo, maximo) {
   const n = parseInt(valor, 10);
   if (!Number.isFinite(n)) return padrao;
   return Math.min(Math.max(n, minimo), maximo);
 }
+
+// Inteiros validados aqui porque alguns vão direto no SQL (nunca vêm do usuário).
+const CACHE_HORAS = inteiroEntre(process.env.CACHE_HORAS, 6, 1, 168);
+const ANALISE_CACHE_HORAS = inteiroEntre(process.env.ANALISE_CACHE_HORAS, 24, 1, 168);
+const LIMITE_BUSCAS_DIA = inteiroEntre(process.env.LIMITE_BUSCAS_DIA, 40, 1, 1000);
+const LIMITE_ANALISES_DIA = inteiroEntre(process.env.LIMITE_ANALISES_DIA, 60, 1, 1000);
+const LIMITE_ALERTAS = inteiroEntre(process.env.LIMITE_ALERTAS, 5, 1, 50);
+const CODIGO_CONVITE = process.env.CODIGO_CONVITE || '';
 
 // Sem segredo fixo, todo deploy derruba os logins. Avisa alto em vez de falhar calado.
 const JWT_SEGREDO = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
@@ -104,6 +105,16 @@ async function prepararBanco() {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS analises_cache (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        chave CHAR(64) NOT NULL,
+        resultado LONGTEXT NOT NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_analise_chave_data (chave, criado_em)
+      )
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS uso_diario (
         id INT AUTO_INCREMENT PRIMARY KEY,
         usuario_id INT NOT NULL,
@@ -140,16 +151,6 @@ async function prepararBanco() {
     `);
 
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS analises_cache (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        chave CHAR(64) NOT NULL,
-        resultado LONGTEXT NOT NULL,
-        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_analise_chave_data (chave, criado_em)
-      )
-    `);
-
-    await pool.query(`
       CREATE TABLE IF NOT EXISTS historico_buscas (
         id INT AUTO_INCREMENT PRIMARY KEY,
         usuario_id INT NOT NULL,
@@ -157,6 +158,25 @@ async function prepararBanco() {
         resultados INT NOT NULL DEFAULT 0,
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_historico_usuario (usuario_id, criado_em)
+      )
+    `);
+
+    // Busca agendada. Só roda quando o corretor cria e deixa ativa.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS alertas (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        usuario_id INT NOT NULL,
+        nome VARCHAR(160) NOT NULL,
+        criterios TEXT NOT NULL,
+        ativo BOOLEAN NOT NULL DEFAULT TRUE,
+        hora TINYINT NOT NULL DEFAULT 7,
+        ultima_execucao TIMESTAMP NULL,
+        ultimo_resultado LONGTEXT,
+        novos LONGTEXT,
+        sumidos LONGTEXT,
+        erro VARCHAR(300) NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_alertas_usuario (usuario_id, ativo)
       )
     `);
 
@@ -313,6 +333,22 @@ app.get('/api/auth/eu', autenticar, async (req, res) => {
   } catch (error) { falhou(res, 'eu', error); }
 });
 
+// Trocar a imobiliária. O corretor pode mudar de casa sem perder a conta e o histórico.
+app.put('/api/auth/perfil', autenticar, async (req, res) => {
+  try {
+    const { nome_imobiliaria } = req.body;
+    const nome = String(nome_imobiliaria || '').trim();
+    if (nome.length < 2) return res.status(400).json({ erro: 'Informe o nome da imobiliária.' });
+    if (nome.length > 150) return res.status(400).json({ erro: 'Nome muito longo.' });
+
+    await pool.query('UPDATE usuarios SET nome_imobiliaria = ? WHERE id = ?', [nome, req.usuario.id]);
+
+    const usuario = { ...req.usuario, nome_imobiliaria: nome };
+    // Token novo porque o nome da imobiliária vai dentro dele.
+    res.json({ token: gerarToken(usuario), usuario });
+  } catch (error) { falhou(res, 'atualizar perfil', error); }
+});
+
 // ============ AUXILIARES ============
 
 function extrairJSON(textoCompleto) {
@@ -357,8 +393,6 @@ function ehLinkDeAnuncio(url) {
   }
 }
 
-// ============ CACHE DE BUSCAS ============
-
 // Mesmos critérios, escritos de formas diferentes, precisam gerar a mesma chave.
 // "Águas Claras", "aguas claras" e " AGUAS CLARAS " são a mesma busca.
 function normalizar(valor) {
@@ -371,16 +405,34 @@ function normalizar(valor) {
     .replace(/\s+/g, ' ');
 }
 
-function chaveDaBusca(criterios) {
-  const base = [
-    'cidade', 'bairro', 'tipo', 'preco_min', 'preco_max',
-    'quartos_min', 'banheiros_min', 'vagas_min', 'area_min', 'area_max', 'detalhes',
-  ]
-    .map((campo) => `${campo}=${normalizar(criterios[campo])}`)
-    .join('|');
+const CAMPOS_BUSCA = [
+  'cidade', 'bairro', 'tipo', 'preco_min', 'preco_max',
+  'quartos_min', 'banheiros_min', 'vagas_min', 'area_min', 'area_max', 'detalhes',
+];
 
+function somenteCriterios(entrada) {
+  const saida = {};
+  CAMPOS_BUSCA.forEach((campo) => {
+    const v = entrada[campo];
+    if (v !== undefined && v !== null && String(v).trim() !== '') saida[campo] = v;
+  });
+  return saida;
+}
+
+function chaveDaBusca(criterios) {
+  const base = CAMPOS_BUSCA.map((campo) => `${campo}=${normalizar(criterios[campo])}`).join('|');
   return crypto.createHash('sha256').update(base).digest('hex');
 }
+
+// Identidade do anúncio. O link é o melhor identificador; sem ele, título + portal.
+function chaveDoAnuncio(anuncio) {
+  const base = anuncio.link
+    ? normalizar(anuncio.link)
+    : `${normalizar(anuncio.site_origem)}|${normalizar(anuncio.titulo)}`;
+  return crypto.createHash('sha256').update(base).digest('hex');
+}
+
+// ============ CACHE DE BUSCAS ============
 
 async function lerDoCache(chave) {
   try {
@@ -409,15 +461,132 @@ async function gravarNoCache(chave, criterios, anuncios) {
   }
 }
 
-// ============ ANÚNCIOS SALVOS E HISTÓRICO ============
-
-// Identidade do anúncio. O link é o melhor identificador; sem ele, título + portal.
-function chaveDoAnuncio(anuncio) {
-  const base = anuncio.link
-    ? normalizar(anuncio.link)
-    : `${normalizar(anuncio.site_origem)}|${normalizar(anuncio.titulo)}`;
-  return crypto.createHash('sha256').update(base).digest('hex');
+async function registrarHistorico(usuarioId, criterios, resultados) {
+  try {
+    await pool.query(
+      'INSERT INTO historico_buscas (usuario_id, criterios, resultados) VALUES (?, ?, ?)',
+      [usuarioId, JSON.stringify(somenteCriterios(criterios)), resultados]
+    );
+    // Mantém só as 15 últimas por usuário.
+    await pool.query(
+      `DELETE FROM historico_buscas
+       WHERE usuario_id = ? AND id NOT IN (
+         SELECT id FROM (
+           SELECT id FROM historico_buscas WHERE usuario_id = ? ORDER BY criado_em DESC LIMIT 15
+         ) recentes
+       )`,
+      [usuarioId, usuarioId]
+    );
+  } catch (error) {
+    console.error('Falha ao registrar historico (busca foi entregue mesmo assim):', error.message);
+  }
 }
+
+// ============ CONSULTA AOS PORTAIS ============
+// Separada das rotas porque a busca agendada chama a mesma função.
+
+async function consultarPortais(criterios) {
+  const { cidade, bairro, tipo, preco_min, preco_max, quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes } = criterios;
+
+  const linhasCriterios = [
+    `Localização: ${bairro}${cidade ? `, ${cidade}` : ''}`,
+    tipo && `Tipo: ${tipo}`,
+    preco_min && `Preço mínimo: R$ ${preco_min}`,
+    preco_max && `Preço máximo: R$ ${preco_max}`,
+    quartos_min && `Mínimo de ${quartos_min} quarto(s)`,
+    banheiros_min && `Mínimo de ${banheiros_min} banheiro(s)`,
+    vagas_min && `Mínimo de ${vagas_min} vaga(s) de garagem`,
+    area_min && `Área mínima: ${area_min}m²`,
+    area_max && `Área máxima: ${area_max}m²`,
+    detalhes && `Preferências adicionais (use para priorizar, nunca para descartar): ${detalhes}`,
+  ].filter(Boolean).join('\n');
+
+  const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
+
+  const prompt = `Você é um assistente especializado em buscar imóveis à venda no Brasil. Hoje é ${hoje}.
+
+Encontre anúncios REAIS e ATIVOS de imóveis à venda em portais como OLX, Viva Real, Zap Imóveis, Imovelweb, DF Imóveis, MGF Imóveis e QuintoAndar, que combinem com estes critérios:
+
+${linhasCriterios}
+
+Método obrigatório de trabalho:
+1. Use web_search para localizar as páginas de resultado dos portais que atendam aos critérios.
+2. Use web_fetch para ABRIR essas páginas de listagem e extrair de dentro delas os anúncios individuais, com a URL específica de cada imóvel, o preço e as características reais.
+3. Se útil, use web_fetch novamente na página do anúncio individual para confirmar preço, características e telefone de contato.
+
+Priorize portais que publicam o telefone do anunciante na própria página, porque o objetivo é permitir o contato imediato.
+
+Regras rígidas sobre o campo "link":
+- Deve ser a URL da PÁGINA DO ANÚNCIO ESPECÍFICO daquele imóvel, com identificador ou slug próprio do imóvel.
+- NUNCA use a URL de uma página de busca, listagem, categoria ou home do portal. Exemplos do que é PROIBIDO: /venda/df/brasilia/apartamento, /imoveis/venda, qualquer URL com parâmetros de filtro.
+- Se você não conseguir obter a URL do anúncio individual, coloque "link": null. Não preencha com a página de listagem.
+
+Demais regras:
+- Extraia os dados do anúncio real. Não estime, não arredonde, não invente valores.
+- Não repita o mesmo imóvel mais de uma vez.
+- Marque "aceita_parceria" como true apenas se o anúncio disser explicitamente que aceita parceria ou comissão com corretores. Marque false apenas se disser explicitamente que não aceita. Caso contrário, null.
+- Ordene do mais barato para o mais caro.
+- Se não encontrar nenhum anúncio real correspondente, retorne a lista vazia. Nunca invente anúncios.
+
+Traga o maior número possível de anúncios reais que atendam aos critérios, até 20. Não pare em poucos resultados se houver mais disponíveis nos portais. Nunca descarte um anúncio apenas porque não conseguiu confirmar as preferências adicionais no texto do anúncio.
+
+Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
+{
+  "anuncios": [
+    {
+      "titulo": "título do anúncio",
+      "preco": número (só o valor, sem R$),
+      "bairro": "bairro",
+      "cidade": "cidade",
+      "tipo": "apartamento/casa/terreno/comercial",
+      "quartos": número ou null,
+      "banheiros": número ou null,
+      "vagas": número ou null,
+      "area_m2": número ou null,
+      "link": "URL direta do anúncio individual, ou null",
+      "site_origem": "nome do site",
+      "telefone": "telefone se disponível, senão null",
+      "aceita_parceria": true, false, ou null
+    }
+  ]
+}`;
+
+  const message = await client.messages.create({
+    model: 'claude-sonnet-5',
+    max_tokens: 16000,
+    tools: [
+      { type: 'web_search_20250305', name: 'web_search', max_uses: 6 },
+      {
+        type: 'web_fetch_20250910',
+        name: 'web_fetch',
+        max_uses: 10,
+        max_content_tokens: 6000,
+      },
+    ],
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const textoCompleto = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+
+  if (process.env.DEBUG_BUSCA === '1') {
+    console.log('=== DIAGNOSTICO BUSCA ===');
+    console.log('stop_reason:', message.stop_reason);
+    console.log('tipos de bloco:', message.content.map((b) => b.type).join(', '));
+    console.log('tamanho do texto:', textoCompleto.length);
+    console.log('resposta bruta:', textoCompleto.slice(0, 2000));
+    console.log('=========================');
+  }
+
+  const resposta = extrairJSON(textoCompleto);
+
+  return (resposta.anuncios || []).map((a) => ({
+    ...a,
+    link_direto: ehLinkDeAnuncio(a.link),
+    link: ehLinkDeAnuncio(a.link) ? a.link : null,
+  }));
+}
+
+// ============ ANÚNCIOS SALVOS E HISTÓRICO ============
 
 const STATUS_VALIDOS = ['contatado', 'respondeu', 'aceita_parceria', 'recusou', 'sem_resposta'];
 
@@ -449,7 +618,6 @@ app.post('/api/salvos', autenticar, async (req, res) => {
     }
 
     const chave = chaveDoAnuncio(anuncio);
-    const contatouAgora = status === 'contatado' ? 'NOW()' : 'contatado_em';
 
     await pool.query(
       `INSERT INTO anuncios_salvos
@@ -461,7 +629,7 @@ app.post('/api/salvos', autenticar, async (req, res) => {
          favorito = ${favorito === undefined ? 'favorito' : 'VALUES(favorito)'},
          status = ${status === undefined ? 'status' : 'VALUES(status)'},
          observacao = ${observacao === undefined ? 'observacao' : 'VALUES(observacao)'},
-         contatado_em = ${contatouAgora}`,
+         contatado_em = ${status === 'contatado' ? 'NOW()' : 'contatado_em'}`,
       [
         req.usuario.id,
         chave,
@@ -508,30 +676,6 @@ app.get('/api/historico', autenticar, async (req, res) => {
   } catch (error) { falhou(res, 'listar historico', error); }
 });
 
-async function registrarHistorico(usuarioId, criterios, resultados) {
-  try {
-    const limpos = Object.fromEntries(
-      Object.entries(criterios).filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
-    );
-    await pool.query(
-      'INSERT INTO historico_buscas (usuario_id, criterios, resultados) VALUES (?, ?, ?)',
-      [usuarioId, JSON.stringify(limpos), resultados]
-    );
-    // Mantém só as 15 últimas por usuário.
-    await pool.query(
-      `DELETE FROM historico_buscas
-       WHERE usuario_id = ? AND id NOT IN (
-         SELECT id FROM (
-           SELECT id FROM historico_buscas WHERE usuario_id = ? ORDER BY criado_em DESC LIMIT 15
-         ) recentes
-       )`,
-      [usuarioId, usuarioId]
-    );
-  } catch (error) {
-    console.error('Falha ao registrar historico (busca foi entregue mesmo assim):', error.message);
-  }
-}
-
 // ============ CARTEIRA DE IMÓVEIS (do corretor logado) ============
 
 app.get('/api/imoveis', autenticar, async (req, res) => {
@@ -577,39 +721,6 @@ app.delete('/api/imoveis/:id', autenticar, async (req, res) => {
     if (result.affectedRows === 0) return res.status(404).json({ erro: 'Não encontrado' });
     res.json({ ok: true });
   } catch (error) { falhou(res, 'remover imovel', error); }
-});
-
-app.post('/api/imoveis/:id/analisar', autenticar, async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT * FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
-    if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
-
-    const im = rows[0];
-    const r = await obterAnalise(req.usuario.id, {
-      titulo: im.titulo, preco: im.preco, bairro: im.bairro, tipo: im.tipo,
-      quartos: im.quartos, banheiros: im.banheiros, area_m2: im.area_m2, descricao: im.descricao,
-    });
-    if (!r.ok) return res.status(r.status).json({ erro: r.erro });
-
-    await pool.query(
-      'INSERT INTO analises_ia (imovel_id, resumo, score, preco_sugestao) VALUES (?, ?, ?, ?)',
-      [req.params.id, r.resposta.resumo, r.resposta.score, r.resposta.preco_sugestao]
-    );
-
-    res.json(r.resposta);
-  } catch (error) { falhou(res, 'analisar imovel', error); }
-});
-
-app.get('/api/imoveis/:id/analise', autenticar, async (req, res) => {
-  try {
-    const [dono] = await pool.query('SELECT id FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
-    if (dono.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
-    const [rows] = await pool.query(
-      'SELECT * FROM analises_ia WHERE imovel_id = ? ORDER BY data_analise DESC LIMIT 1',
-      [req.params.id]
-    );
-    res.json(rows[0] || {});
-  } catch (error) { falhou(res, 'ver analise', error); }
 });
 
 // ============ ANÁLISE DE PREÇO ============
@@ -702,6 +813,39 @@ async function obterAnalise(usuarioId, im) {
   return { ok: true, resposta: { ...resposta, do_cache: false, analisado_em: new Date() } };
 }
 
+app.post('/api/imoveis/:id/analisar', autenticar, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
+
+    const im = rows[0];
+    const r = await obterAnalise(req.usuario.id, {
+      titulo: im.titulo, preco: im.preco, bairro: im.bairro, tipo: im.tipo,
+      quartos: im.quartos, banheiros: im.banheiros, area_m2: im.area_m2, descricao: im.descricao,
+    });
+    if (!r.ok) return res.status(r.status).json({ erro: r.erro });
+
+    await pool.query(
+      'INSERT INTO analises_ia (imovel_id, resumo, score, preco_sugestao) VALUES (?, ?, ?, ?)',
+      [req.params.id, r.resposta.resumo, r.resposta.score, r.resposta.preco_sugestao]
+    );
+
+    res.json(r.resposta);
+  } catch (error) { falhou(res, 'analisar imovel', error); }
+});
+
+app.get('/api/imoveis/:id/analise', autenticar, async (req, res) => {
+  try {
+    const [dono] = await pool.query('SELECT id FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
+    if (dono.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
+    const [rows] = await pool.query(
+      'SELECT * FROM analises_ia WHERE imovel_id = ? ORDER BY data_analise DESC LIMIT 1',
+      [req.params.id]
+    );
+    res.json(rows[0] || {});
+  } catch (error) { falhou(res, 'ver analise', error); }
+});
+
 // Análise avulsa: recebe os dados direto no corpo, sem precisar estar salvo no banco
 app.post('/api/analisar-avulso', autenticar, async (req, res) => {
   try {
@@ -714,26 +858,23 @@ app.post('/api/analisar-avulso', autenticar, async (req, res) => {
   } catch (error) { falhou(res, 'analise avulsa', error); }
 });
 
-// ============ BUSCA DE ANÚNCIOS REAIS NA WEB ============
+// ============ BUSCA ============
 
 app.post('/api/buscar-anuncios', autenticar, async (req, res) => {
   try {
     const entrada = { ...req.query, ...req.body };
-    const { cidade, bairro, tipo, preco_min, preco_max, quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes, forcar } = entrada;
-    if (!bairro) return res.status(400).json({ erro: 'Informe o bairro para buscar' });
+    const criterios = somenteCriterios(entrada);
+    if (!criterios.bairro) return res.status(400).json({ erro: 'Informe o bairro para buscar' });
 
-    const criterios = {
-      cidade, bairro, tipo, preco_min, preco_max,
-      quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes,
-    };
     const chave = chaveDaBusca(criterios);
+    const forcar = entrada.forcar;
     const ignorarCache = forcar === '1' || forcar === 1 || forcar === true || forcar === 'true';
 
     // Cache não consome cota: resultado salvo não custa API.
     if (!ignorarCache) {
       const salvo = await lerDoCache(chave);
       if (salvo) {
-        console.log(`Cache HIT ${chave.slice(0, 8)} (${bairro}), nenhuma chamada de IA`);
+        console.log(`Cache HIT ${chave.slice(0, 8)} (${criterios.bairro}), nenhuma chamada de IA`);
         await registrarHistorico(req.usuario.id, criterios, salvo.anuncios.length);
         return res.json({ anuncios: salvo.anuncios, do_cache: true, buscado_em: salvo.buscado_em });
       }
@@ -744,117 +885,187 @@ app.post('/api/buscar-anuncios', autenticar, async (req, res) => {
       return res.status(429).json({ erro: `Limite de ${LIMITE_BUSCAS_DIA} buscas por dia atingido. Volta amanhã.` });
     }
 
-    console.log(`Cache MISS ${chave.slice(0, 8)} (${bairro}), consultando a IA`);
-
-    const linhasCriterios = [
-      `Localização: ${bairro}${cidade ? `, ${cidade}` : ''}`,
-      tipo && `Tipo: ${tipo}`,
-      preco_min && `Preço mínimo: R$ ${preco_min}`,
-      preco_max && `Preço máximo: R$ ${preco_max}`,
-      quartos_min && `Mínimo de ${quartos_min} quarto(s)`,
-      banheiros_min && `Mínimo de ${banheiros_min} banheiro(s)`,
-      vagas_min && `Mínimo de ${vagas_min} vaga(s) de garagem`,
-      area_min && `Área mínima: ${area_min}m²`,
-      area_max && `Área máxima: ${area_max}m²`,
-      detalhes && `Preferências adicionais (use para priorizar, nunca para descartar): ${detalhes}`,
-    ].filter(Boolean).join('\n');
-
-    const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
-
-    const prompt = `Você é um assistente especializado em buscar imóveis à venda no Brasil. Hoje é ${hoje}.
-
-Encontre anúncios REAIS e ATIVOS de imóveis à venda em portais como OLX, Viva Real, Zap Imóveis, Imovelweb, DF Imóveis, MGF Imóveis e QuintoAndar, que combinem com estes critérios:
-
-${linhasCriterios}
-
-Método obrigatório de trabalho:
-1. Use web_search para localizar as páginas de resultado dos portais que atendam aos critérios.
-2. Use web_fetch para ABRIR essas páginas de listagem e extrair de dentro delas os anúncios individuais, com a URL específica de cada imóvel, o preço e as características reais.
-3. Se útil, use web_fetch novamente na página do anúncio individual para confirmar preço, características e telefone de contato.
-
-Priorize portais que publicam o telefone do anunciante na própria página, porque o objetivo é permitir o contato imediato.
-
-Regras rígidas sobre o campo "link":
-- Deve ser a URL da PÁGINA DO ANÚNCIO ESPECÍFICO daquele imóvel, com identificador ou slug próprio do imóvel.
-- NUNCA use a URL de uma página de busca, listagem, categoria ou home do portal. Exemplos do que é PROIBIDO: /venda/df/brasilia/apartamento, /imoveis/venda, qualquer URL com parâmetros de filtro.
-- Se você não conseguir obter a URL do anúncio individual, coloque "link": null. Não preencha com a página de listagem.
-
-Demais regras:
-- Extraia os dados do anúncio real. Não estime, não arredonde, não invente valores.
-- Não repita o mesmo imóvel mais de uma vez.
-- Marque "aceita_parceria" como true apenas se o anúncio disser explicitamente que aceita parceria ou comissão com corretores. Marque false apenas se disser explicitamente que não aceita. Caso contrário, null.
-- Ordene do mais barato para o mais caro.
-- Se não encontrar nenhum anúncio real correspondente, retorne a lista vazia. Nunca invente anúncios.
-
-Traga o maior número possível de anúncios reais que atendam aos critérios, até 20. Não pare em poucos resultados se houver mais disponíveis nos portais. Nunca descarte um anúncio apenas porque não conseguiu confirmar as preferências adicionais no texto do anúncio.
-
-Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
-{
-  "anuncios": [
-    {
-      "titulo": "título do anúncio",
-      "preco": número (só o valor, sem R$),
-      "bairro": "bairro",
-      "cidade": "cidade",
-      "tipo": "apartamento/casa/terreno/comercial",
-      "quartos": número ou null,
-      "banheiros": número ou null,
-      "vagas": número ou null,
-      "area_m2": número ou null,
-      "link": "URL direta do anúncio individual, ou null",
-      "site_origem": "nome do site",
-      "telefone": "telefone se disponível, senão null",
-      "aceita_parceria": true, false, ou null
-    }
-  ]
-}`;
-
-    const message = await client.messages.create({
-      model: 'claude-sonnet-5',
-      max_tokens: 16000,
-      tools: [
-        { type: 'web_search_20250305', name: 'web_search', max_uses: 6 },
-        {
-          type: 'web_fetch_20250910',
-          name: 'web_fetch',
-          max_uses: 10,
-          max_content_tokens: 6000,
-        },
-      ],
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    const textoCompleto = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
-
-    if (process.env.DEBUG_BUSCA === '1') {
-      console.log('=== DIAGNOSTICO BUSCA ===');
-      console.log('stop_reason:', message.stop_reason);
-      console.log('tipos de bloco:', message.content.map((b) => b.type).join(', '));
-      console.log('tamanho do texto:', textoCompleto.length);
-      console.log('resposta bruta:', textoCompleto.slice(0, 2000));
-      console.log('=========================');
-    }
-
-    const resposta = extrairJSON(textoCompleto);
-
-    const anuncios = (resposta.anuncios || []).map((a) => ({
-      ...a,
-      link_direto: ehLinkDeAnuncio(a.link),
-      link: ehLinkDeAnuncio(a.link) ? a.link : null,
-    }));
+    console.log(`Cache MISS ${chave.slice(0, 8)} (${criterios.bairro}), consultando a IA`);
+    const anuncios = await consultarPortais(criterios);
 
     // só vale guardar busca que achou alguma coisa
-    if (anuncios.length > 0) {
-      await gravarNoCache(chave, criterios, anuncios);
-    }
+    if (anuncios.length > 0) await gravarNoCache(chave, criterios, anuncios);
     await registrarHistorico(req.usuario.id, criterios, anuncios.length);
 
     res.json({ anuncios, do_cache: false, buscado_em: new Date() });
   } catch (error) { falhou(res, 'buscar anuncios', error); }
 });
 
+// ============ BUSCA AGENDADA (ALERTAS) ============
+// Nada roda por conta própria: o corretor cria o alerta e deixa ativo.
+// Alerta desativado nunca consulta a IA e nunca gasta nada.
+
+function alertaParaJson(row) {
+  return {
+    ...row,
+    criterios: row.criterios ? JSON.parse(row.criterios) : {},
+    ultimo_resultado: row.ultimo_resultado ? JSON.parse(row.ultimo_resultado) : [],
+    novos: row.novos ? JSON.parse(row.novos) : [],
+    sumidos: row.sumidos ? JSON.parse(row.sumidos) : [],
+    ativo: Boolean(row.ativo),
+  };
+}
+
+app.get('/api/alertas', autenticar, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT * FROM alertas WHERE usuario_id = ? ORDER BY criado_em DESC',
+      [req.usuario.id]
+    );
+    res.json(rows.map(alertaParaJson));
+  } catch (error) { falhou(res, 'listar alertas', error); }
+});
+
+app.post('/api/alertas', autenticar, async (req, res) => {
+  try {
+    const { nome, criterios, hora } = req.body;
+    const limpos = somenteCriterios(criterios || {});
+    if (!limpos.bairro) return res.status(400).json({ erro: 'O alerta precisa pelo menos do bairro.' });
+
+    const [contagem] = await pool.query('SELECT COUNT(*) AS total FROM alertas WHERE usuario_id = ?', [req.usuario.id]);
+    if (contagem[0].total >= LIMITE_ALERTAS) {
+      return res.status(403).json({ erro: `Seu plano permite ${LIMITE_ALERTAS} alertas. Apague um para criar outro.` });
+    }
+
+    const nomeFinal = String(nome || '').trim() || `${limpos.bairro}${limpos.cidade ? ', ' + limpos.cidade : ''}`;
+
+    const [result] = await pool.query(
+      'INSERT INTO alertas (usuario_id, nome, criterios, hora, ativo) VALUES (?, ?, ?, ?, TRUE)',
+      [req.usuario.id, nomeFinal.slice(0, 160), JSON.stringify(limpos), inteiroEntre(hora, 7, 0, 23)]
+    );
+
+    const [rows] = await pool.query('SELECT * FROM alertas WHERE id = ?', [result.insertId]);
+    res.status(201).json(alertaParaJson(rows[0]));
+  } catch (error) { falhou(res, 'criar alerta', error); }
+});
+
+app.put('/api/alertas/:id', autenticar, async (req, res) => {
+  try {
+    const [dono] = await pool.query('SELECT id FROM alertas WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
+    if (dono.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
+
+    const { nome, ativo, hora } = req.body;
+    const campos = [];
+    const valores = [];
+    if (nome !== undefined) { campos.push('nome = ?'); valores.push(String(nome).trim().slice(0, 160)); }
+    if (ativo !== undefined) { campos.push('ativo = ?'); valores.push(Boolean(ativo)); }
+    if (hora !== undefined) { campos.push('hora = ?'); valores.push(inteiroEntre(hora, 7, 0, 23)); }
+    if (campos.length === 0) return res.status(400).json({ erro: 'Nada para alterar' });
+
+    valores.push(req.params.id);
+    await pool.query(`UPDATE alertas SET ${campos.join(', ')} WHERE id = ?`, valores);
+
+    const [rows] = await pool.query('SELECT * FROM alertas WHERE id = ?', [req.params.id]);
+    res.json(alertaParaJson(rows[0]));
+  } catch (error) { falhou(res, 'atualizar alerta', error); }
+});
+
+app.delete('/api/alertas/:id', autenticar, async (req, res) => {
+  try {
+    const [result] = await pool.query('DELETE FROM alertas WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
+    if (result.affectedRows === 0) return res.status(404).json({ erro: 'Não encontrado' });
+    res.json({ ok: true });
+  } catch (error) { falhou(res, 'remover alerta', error); }
+});
+
+// Rodar na hora, sem esperar o horário. Consome cota como qualquer busca.
+app.post('/api/alertas/:id/rodar', autenticar, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM alertas WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
+
+    const temCota = await consumirCota(req.usuario.id, 'buscas', LIMITE_BUSCAS_DIA);
+    if (!temCota) {
+      return res.status(429).json({ erro: `Limite de ${LIMITE_BUSCAS_DIA} buscas por dia atingido.` });
+    }
+
+    const atualizado = await rodarAlerta(rows[0]);
+    res.json(alertaParaJson(atualizado));
+  } catch (error) { falhou(res, 'rodar alerta', error); }
+});
+
+// Compara com a execução anterior. É daqui que sai o "apareceu imóvel novo".
+async function rodarAlerta(alerta) {
+  const criterios = JSON.parse(alerta.criterios);
+  const anteriores = alerta.ultimo_resultado ? JSON.parse(alerta.ultimo_resultado) : [];
+  const chavesAntigas = new Set(anteriores.map(chaveDoAnuncio));
+
+  try {
+    // Alerta sempre busca fresco: o objetivo é justamente detectar mudança.
+    const anuncios = await consultarPortais(criterios);
+    const chavesNovas = new Set(anuncios.map(chaveDoAnuncio));
+
+    const novos = anuncios.filter((a) => !chavesAntigas.has(chaveDoAnuncio(a)));
+    // Sumiu do portal costuma significar vendido ou retirado.
+    const sumidos = anteriores.filter((a) => !chavesNovas.has(chaveDoAnuncio(a)));
+
+    // Alimenta o cache para a busca manual do corretor sair instantânea depois.
+    if (anuncios.length > 0) await gravarNoCache(chaveDaBusca(criterios), criterios, anuncios);
+
+    await pool.query(
+      `UPDATE alertas SET ultimo_resultado = ?, novos = ?, sumidos = ?, ultima_execucao = NOW(), erro = NULL WHERE id = ?`,
+      [
+        JSON.stringify(anuncios),
+        JSON.stringify(anteriores.length === 0 ? [] : novos),
+        JSON.stringify(sumidos),
+        alerta.id,
+      ]
+    );
+    console.log(`Alerta ${alerta.id} rodou: ${anuncios.length} anuncios, ${novos.length} novos, ${sumidos.length} sumiram`);
+  } catch (error) {
+    console.error(`Alerta ${alerta.id} falhou:`, error.message);
+    await pool.query('UPDATE alertas SET ultima_execucao = NOW(), erro = ? WHERE id = ?', [
+      String(error.message).slice(0, 300),
+      alerta.id,
+    ]);
+  }
+
+  const [rows] = await pool.query('SELECT * FROM alertas WHERE id = ?', [alerta.id]);
+  return rows[0];
+}
+
+// Verifica de tempos em tempos quem está na hora de rodar. Um por dia, por alerta.
+async function processarAlertas() {
+  try {
+    const [rows] = await pool.query(
+      `SELECT * FROM alertas
+       WHERE ativo = TRUE
+         AND hora <= HOUR(NOW())
+         AND (ultima_execucao IS NULL OR DATE(ultima_execucao) < CURDATE())
+       ORDER BY id
+       LIMIT 10`
+    );
+    if (rows.length === 0) return;
+
+    console.log(`Processando ${rows.length} alerta(s) agendado(s)`);
+    for (const alerta of rows) {
+      const temCota = await consumirCota(alerta.usuario_id, 'buscas', LIMITE_BUSCAS_DIA);
+      if (!temCota) {
+        // Marca como executado para não ficar tentando o dia inteiro.
+        await pool.query('UPDATE alertas SET ultima_execucao = NOW(), erro = ? WHERE id = ?', [
+          'Cota diaria de buscas esgotada',
+          alerta.id,
+        ]);
+        continue;
+      }
+      await rodarAlerta(alerta);
+    }
+  } catch (error) {
+    console.error('Falha ao processar alertas:', error.message);
+  }
+}
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, async () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
   await prepararBanco();
+
+  // A cada 15 minutos olha se algum alerta ativo está na hora.
+  setInterval(processarAlertas, 15 * 60 * 1000);
+  setTimeout(processarAlertas, 60 * 1000);
 });
