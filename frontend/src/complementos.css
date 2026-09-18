@@ -83,3 +83,119 @@
     flex-wrap: wrap;
   }
 }
+
+/* Favoritos, situação do contato e buscas recentes */
+
+.card-canto {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.estrela {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--tinta-fraca);
+  transition: color 0.15s, transform 0.15s;
+}
+
+.estrela:hover {
+  transform: scale(1.15);
+  color: var(--ambar);
+}
+
+.estrela-ativa {
+  color: var(--ambar);
+}
+
+.status-linha {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.status-rotulo {
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--tinta-fraca);
+  flex-shrink: 0;
+}
+
+.status-select {
+  padding: 6px 10px;
+  font-size: 13px;
+  border-radius: 6px;
+  width: auto;
+  flex: 1;
+}
+
+.marca-tempo {
+  font-size: 12.5px;
+  color: var(--tinta-fraca);
+  margin-bottom: 12px;
+}
+
+/* A borda esquerda do card conta a situação sem precisar ler nada */
+.card-contatado { border-left-color: var(--ambar); }
+.card-respondeu { border-left-color: var(--azul); }
+.card-aceita_parceria { border-left-color: var(--verde); }
+.card-recusou { border-left-color: var(--vermelho); }
+.card-sem_resposta { border-left-color: var(--tinta-fraca); }
+
+.historico,
+.filtros-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--linha);
+  border-radius: 20px;
+  background: var(--branco);
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--tinta);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.chip:hover {
+  border-color: var(--azul);
+}
+
+.chip-texto {
+  font-weight: 550;
+  text-transform: capitalize;
+}
+
+.chip-meta {
+  font-size: 11.5px;
+  color: var(--tinta-fraca);
+}
+
+.chip-ativo {
+  background: var(--azul);
+  border-color: var(--azul);
+  color: var(--branco);
+}
+
+.chip-ativo:hover {
+  border-color: var(--azul-escuro);
+}
+
+.filtros-chips {
+  margin-top: 4px;
+}
