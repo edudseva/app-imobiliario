@@ -6,20 +6,20 @@
    por padrão, e o desktop entra como progressive enhancement. */
 
 :root {
-  --fundo: #121212;
-  --superficie: #1e1e1e;
-  --superficie-2: #2d2d2d;
-  --superficie-3: #3a3a3a;
-  --linha: #383838;
-  --linha-forte: #4a4a4a;
+  --fundo: #1a1a1a;
+  --superficie: #242424;
+  --superficie-2: #303030;
+  --superficie-3: #3d3d3d;
+  --linha: #3d3d3d;
+  --linha-forte: #525252;
 
   --texto: #ffffff;
   --texto-suave: #d3d3d3;
-  --texto-fraco: #8f8f8f;
+  --texto-fraco: #949494;
 
-  --acento: #e42320;
-  --acento-escuro: #bd1c1a;
-  --acento-fraco: rgba(228, 35, 32, 0.14);
+  --acento: #5aa9e6;
+  --acento-escuro: #3d8ed1;
+  --acento-fraco: rgba(90, 169, 230, 0.16);
 
   --verde: #2e9e63;
   --verde-escuro: #25804f;
@@ -61,7 +61,7 @@ body {
 /* ===== Topo ===== */
 
 .topo {
-  background: #000000;
+  background: #141414;
   border-bottom: 1px solid var(--linha);
   position: sticky;
   top: 0;
@@ -637,7 +637,7 @@ textarea {
 
 .barra {
   height: 4px;
-  background: #3a3a3a;
+  background: #3d3d3d;
   border-radius: 2px;
   overflow: hidden;
   margin-bottom: 10px;
