@@ -282,6 +282,42 @@ async function prepararBanco() {
       )
     `);
 
+    // Estas duas nasceram à mão no phpMyAdmin. Agora o código cria tudo,
+    // então um banco vazio sobe funcionando sem ninguém rodar SQL.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS imoveis (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        titulo VARCHAR(255) NOT NULL,
+        preco DECIMAL(12,2) NOT NULL,
+        bairro VARCHAR(100) NOT NULL,
+        tipo VARCHAR(50) NOT NULL DEFAULT 'apartamento',
+        quartos INT NULL,
+        banheiros INT NULL,
+        area_m2 DECIMAL(8,2) NULL,
+        descricao TEXT,
+        contato_telefone VARCHAR(20),
+        contato_email VARCHAR(100),
+        status VARCHAR(20) NOT NULL DEFAULT 'ativo',
+        usuario_id INT NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_imoveis_usuario (usuario_id),
+        INDEX idx_imoveis_status (status)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS analises_ia (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        imovel_id INT,
+        resumo TEXT,
+        score INT,
+        preco_sugestao DECIMAL(12,2),
+        data_analise TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_analises_imovel (imovel_id)
+      )
+    `);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS buscas_cache (
         id INT AUTO_INCREMENT PRIMARY KEY,
