@@ -223,6 +223,18 @@ async function colunaExiste(tabela, coluna) {
   return rows.length > 0;
 }
 
+// Cada passo isolado: um que falha não pode impedir os seguintes.
+// Já aconteceu de um índice duplicado abortar a migração inteira e derrubar o login.
+async function passo(nome, fn) {
+  try {
+    await fn();
+    return true;
+  } catch (error) {
+    console.error(`[migracao:${nome}] ${error.code || ''} ${error.sqlMessage || error.message || error}`);
+    return false;
+  }
+}
+
 // Cria/ajusta tudo sozinho no boot, sem precisar abrir o phpMyAdmin
 async function prepararBanco() {
   try {
@@ -326,42 +338,73 @@ async function prepararBanco() {
       )
     `);
 
-    // Assinatura e equipe. Conta principal é quem paga; membros herdam o plano dela.
-    if (!(await colunaExiste('usuarios', 'conta_principal_id'))) {
-      await pool.query('ALTER TABLE usuarios ADD COLUMN conta_principal_id INT NULL');
+    // Cada coluna no seu próprio passo: índice duplicado não derruba o resto.
+    await passo('usuarios.conta_principal_id', async () => {
+      if (!(await colunaExiste('usuarios', 'conta_principal_id'))) {
+        await pool.query('ALTER TABLE usuarios ADD COLUMN conta_principal_id INT NULL');
+      }
+    });
+    await passo('usuarios.indice_conta', async () => {
       await pool.query('ALTER TABLE usuarios ADD INDEX idx_usuarios_conta (conta_principal_id)');
-      console.log('Coluna conta_principal_id criada em usuarios.');
-    }
-    if (!(await colunaExiste('usuarios', 'plano_expira_em'))) {
-      await pool.query('ALTER TABLE usuarios ADD COLUMN plano_expira_em DATE NULL');
-      await pool.query("ALTER TABLE usuarios ADD COLUMN status_assinatura VARCHAR(20) NOT NULL DEFAULT 'teste'");
+    });
+    await passo('usuarios.plano_expira_em', async () => {
+      if (!(await colunaExiste('usuarios', 'plano_expira_em'))) {
+        await pool.query('ALTER TABLE usuarios ADD COLUMN plano_expira_em DATE NULL');
+      }
+    });
+    await passo('usuarios.status_assinatura', async () => {
+      if (!(await colunaExiste('usuarios', 'status_assinatura'))) {
+        await pool.query("ALTER TABLE usuarios ADD COLUMN status_assinatura VARCHAR(20) NOT NULL DEFAULT 'teste'");
+      }
+    });
+    await passo('usuarios.periodo_teste', async () => {
       // Contas que já existiam entram no período de teste a partir de hoje.
       await pool.query(
         `UPDATE usuarios SET plano = 'teste', status_assinatura = 'teste',
          plano_expira_em = DATE_ADD(CURDATE(), INTERVAL ${DIAS_TESTE} DAY)
          WHERE plano_expira_em IS NULL`
       );
-      console.log('Colunas de assinatura criadas em usuarios.');
-    }
-
-    if (!(await colunaExiste('usuarios', 'notificar_email'))) {
-      await pool.query('ALTER TABLE usuarios ADD COLUMN notificar_email BOOLEAN NOT NULL DEFAULT TRUE');
-      await pool.query('ALTER TABLE usuarios ADD COLUMN email_notificacao VARCHAR(160) NULL');
-      console.log('Colunas de notificacao criadas em usuarios.');
-    }
+    });
+    await passo('usuarios.notificar_email', async () => {
+      if (!(await colunaExiste('usuarios', 'notificar_email'))) {
+        await pool.query('ALTER TABLE usuarios ADD COLUMN notificar_email BOOLEAN NOT NULL DEFAULT TRUE');
+      }
+    });
+    await passo('usuarios.email_notificacao', async () => {
+      if (!(await colunaExiste('usuarios', 'email_notificacao'))) {
+        await pool.query('ALTER TABLE usuarios ADD COLUMN email_notificacao VARCHAR(160) NULL');
+      }
+    });
 
     // A carteira precisa ter dono, senão uma imobiliária enxerga a da outra.
-    if (!(await colunaExiste('imoveis', 'usuario_id'))) {
-      await pool.query('ALTER TABLE imoveis ADD COLUMN usuario_id INT NULL');
+    await passo('imoveis.usuario_id', async () => {
+      if (!(await colunaExiste('imoveis', 'usuario_id'))) {
+        await pool.query('ALTER TABLE imoveis ADD COLUMN usuario_id INT NULL');
+      }
+    });
+    await passo('imoveis.indice_usuario', async () => {
       await pool.query('ALTER TABLE imoveis ADD INDEX idx_imoveis_usuario (usuario_id)');
-      console.log('Coluna usuario_id criada em imoveis. Imoveis antigos ficaram sem dono.');
+    });
+
+    await passo('limpeza_cache', async () => {
+      await pool.query('DELETE FROM buscas_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
+      await pool.query('DELETE FROM analises_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
+    });
+
+    // Confere o que realmente existe: é isso que decide se o login vai funcionar.
+    const faltando = [];
+    for (const col of ['conta_principal_id', 'plano_expira_em', 'status_assinatura', 'notificar_email', 'email_notificacao']) {
+      if (!(await colunaExiste('usuarios', col))) faltando.push(col);
+    }
+    if (faltando.length > 0) {
+      console.error('ATENCAO: colunas ausentes em usuarios: ' + faltando.join(', '));
+    } else {
+      console.log('Esquema de usuarios completo.');
     }
 
-    await pool.query('DELETE FROM buscas_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
-    await pool.query('DELETE FROM analises_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
     console.log(`Banco pronto. Cache: ${CACHE_HORAS}h. Planos: ${Object.keys(PLANOS).join(', ')}.`);
   } catch (error) {
-    console.error('Falha ao preparar o banco:', error.message);
+    console.error('Falha ao preparar o banco:', error.code || '', error.sqlMessage || error.message || error);
   }
 }
 
@@ -380,10 +423,19 @@ async function autenticar(req, res, next) {
   const token = cabecalho.startsWith('Bearer ') ? cabecalho.slice(7) : null;
   if (!token) return res.status(401).json({ erro: 'Faça login para continuar' });
 
+  // Token inválido é 401. Falha de banco NÃO é 401: devolver 401 aqui fazia o
+  // app deslogar sozinho toda vez que o esquema estava incompleto.
+  let dados;
   try {
-    const dados = jwt.verify(token, JWT_SEGREDO);
+    dados = jwt.verify(token, JWT_SEGREDO);
+  } catch {
+    return res.status(401).json({ erro: 'Sessão expirada. Faça login de novo.' });
+  }
+
+  try {
+    // Só colunas que existem desde a primeira versão, para nunca quebrar aqui.
     const [rows] = await pool.query(
-      'SELECT id, nome_imobiliaria, email, plano, ativo, conta_principal_id FROM usuarios WHERE id = ?',
+      'SELECT id, nome_imobiliaria, email, plano, ativo FROM usuarios WHERE id = ?',
       [dados.id]
     );
     if (rows.length === 0 || !rows[0].ativo) {
@@ -392,21 +444,32 @@ async function autenticar(req, res, next) {
     req.usuario = rows[0];
 
     // Quem paga é a conta principal. Membro de equipe herda plano e cota dela.
-    const contaId = rows[0].conta_principal_id || rows[0].id;
-    const [contaRows] = await pool.query(
-      'SELECT id, nome_imobiliaria, email, plano, plano_expira_em, status_assinatura FROM usuarios WHERE id = ?',
-      [contaId]
-    );
-    const conta = contaRows[0] || rows[0];
+    // Se as colunas de assinatura ainda não existem, segue com o padrão em vez de derrubar.
+    let conta = { ...rows[0], plano: rows[0].plano || 'teste', plano_expira_em: null, status_assinatura: 'teste' };
+    let ehDono = true;
+    try {
+      const [extra] = await pool.query('SELECT conta_principal_id FROM usuarios WHERE id = ?', [dados.id]);
+      const contaId = (extra[0] && extra[0].conta_principal_id) || rows[0].id;
+      ehDono = !(extra[0] && extra[0].conta_principal_id);
+      const [contaRows] = await pool.query(
+        'SELECT id, nome_imobiliaria, email, plano, plano_expira_em, status_assinatura FROM usuarios WHERE id = ?',
+        [contaId]
+      );
+      if (contaRows[0]) conta = contaRows[0];
+    } catch (error) {
+      console.error('[autenticar] esquema de assinatura incompleto, usando padrao:', error.code || error.message);
+    }
+
     req.conta = {
       ...conta,
       limites: limitesDoPlano(conta.plano),
-      ehDono: !rows[0].conta_principal_id,
+      ehDono,
       vencida: assinaturaVencida(conta),
     };
     next();
-  } catch {
-    return res.status(401).json({ erro: 'Sessão expirada. Faça login de novo.' });
+  } catch (error) {
+    console.error('[autenticar] falha ao carregar a conta:', error.code || '', error.sqlMessage || error.message);
+    return res.status(503).json({ erro: 'Não foi possível validar sua conta agora. Tente de novo em instantes.' });
   }
 }
 
@@ -557,10 +620,15 @@ app.post('/api/auth/login', limiteLogin, async (req, res) => {
 
 app.get('/api/auth/eu', autenticar, async (req, res) => {
   try {
-    const [pref] = await pool.query(
-      'SELECT notificar_email, email_notificacao FROM usuarios WHERE id = ?',
-      [req.usuario.id]
-    );
+    let pref = [];
+    try {
+      [pref] = await pool.query(
+        'SELECT notificar_email, email_notificacao FROM usuarios WHERE id = ?',
+        [req.usuario.id]
+      );
+    } catch (error) {
+      console.error('[eu] colunas de notificacao ausentes:', error.code || error.message);
+    }
     const uso = await lerUso(req.conta.id);
     const lim = req.conta.limites;
 
