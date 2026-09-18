@@ -309,8 +309,90 @@
   white-space: nowrap;
 }
 
+/* ===== Meu dia ===== */
+
+.grupo-novos {
+  margin-bottom: 18px;
+}
+
+.grupo-titulo {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--acento);
+  margin-bottom: 8px;
+}
+
+.pendencia {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--linha);
+}
+
+.pendencia:last-child {
+  border-bottom: none;
+}
+
+.pendencia-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.pendencia-titulo {
+  font-size: 14px;
+  color: var(--texto);
+  line-height: 1.4;
+}
+
+.pendencia-meta {
+  font-size: 12.5px;
+  color: var(--texto-fraco);
+}
+
+.pendencia-acoes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pendencia-acoes .status-select {
+  flex: 1 1 150px;
+  min-width: 140px;
+}
+
+.pendencia-acoes .btn {
+  flex: 1 1 140px;
+}
+
 @media (min-width: 720px) {
   .caixa-login {
     padding: 32px;
+  }
+
+  .pendencia {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .pendencia-acoes {
+    flex-shrink: 0;
+    flex-wrap: nowrap;
+  }
+
+  .pendencia-acoes .status-select {
+    flex: 0 0 auto;
+    width: 160px;
+  }
+
+  .pendencia-acoes .btn {
+    flex: 0 0 auto;
   }
 }
