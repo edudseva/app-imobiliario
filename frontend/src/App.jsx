@@ -258,11 +258,39 @@ function Login({ aoEntrar }) {
   );
 }
 
-function CartaoResultado({ anuncio, analise, analisando, perfil, perfilPreenchido, contatoAberto, copiado, aoAnalisar, aoAbrirContato, aoCopiar }) {
+const STATUS_ROTULOS = {
+  contatado: 'Contatado',
+  respondeu: 'Respondeu',
+  aceita_parceria: 'Aceita parceria',
+  recusou: 'Não faz parceria',
+  sem_resposta: 'Sem resposta',
+};
+
+function ControleStatus({ salvo, aoMarcarStatus }) {
+  const atual = salvo?.status || '';
+  return (
+    <div className="status-linha">
+      <span className="status-rotulo">Situação</span>
+      <select
+        className="status-select"
+        value={atual}
+        onChange={(e) => aoMarcarStatus(e.target.value || null)}
+      >
+        <option value="">Não contatado</option>
+        {Object.entries(STATUS_ROTULOS).map(([valor, rotulo]) => (
+          <option key={valor} value={valor}>{rotulo}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function CartaoResultado({ anuncio, analise, analisando, perfil, perfilPreenchido, contatoAberto, copiado, salvo, aoAnalisar, aoAbrirContato, aoCopiar, aoFavoritar, aoMarcarStatus, aoContatar }) {
   const zap = montarLinkWhatsApp(anuncio.telefone, anuncio.titulo);
+  const favorito = Boolean(salvo?.favorito);
 
   return (
-    <article className="card">
+    <article className={`card ${salvo?.status ? `card-${salvo.status}` : ''}`}>
       <div className="card-cabecalho">
         <div>
           <h3>{anuncio.titulo}</h3>
@@ -272,7 +300,17 @@ function CartaoResultado({ anuncio, analise, analisando, perfil, perfilPreenchid
             {anuncio.tipo ? ` · ${anuncio.tipo}` : ''}
           </p>
         </div>
-        <span className="portal">{anuncio.site_origem}</span>
+        <div className="card-canto">
+          <button
+            className={`estrela ${favorito ? 'estrela-ativa' : ''}`}
+            onClick={aoFavoritar}
+            title={favorito ? 'Tirar dos favoritos' : 'Favoritar'}
+            aria-label={favorito ? 'Tirar dos favoritos' : 'Favoritar'}
+          >
+            {favorito ? '★' : '☆'}
+          </button>
+          <span className="portal">{anuncio.site_origem}</span>
+        </div>
       </div>
 
       <p className="preco">{formatarPreco(anuncio.preco)}</p>
@@ -298,9 +336,15 @@ function CartaoResultado({ anuncio, analise, analisando, perfil, perfilPreenchid
         <BlocoContato anuncio={anuncio} perfil={perfil} copiado={copiado} aoCopiar={aoCopiar} />
       ) : null}
 
+      {salvo?.status || salvo?.favorito ? (
+        <ControleStatus salvo={salvo} aoMarcarStatus={aoMarcarStatus} />
+      ) : null}
+
       <div className="card-acoes">
         {zap ? (
-          <a className="btn btn-zap" href={zap} target="_blank" rel="noreferrer">Falar no WhatsApp</a>
+          <a className="btn btn-zap" href={zap} target="_blank" rel="noreferrer" onClick={aoContatar}>
+            Falar no WhatsApp
+          </a>
         ) : null}
 
         {!zap && anuncio.link ? (
@@ -345,6 +389,11 @@ function App() {
   const [salvando, setSalvando] = useState(false);
   const [mostrarFormCarteira, setMostrarFormCarteira] = useState(false);
 
+  // Anúncios marcados, indexados pelo mesmo id local que os cards usam.
+  const [salvos, setSalvos] = useState({});
+  const [historico, setHistorico] = useState([]);
+  const [filtroSalvos, setFiltroSalvos] = useState('todos');
+
   const aviso = (texto, tipo = 'info') => {
     setMensagem({ texto, tipo });
     if (tipo !== 'erro') setTimeout(() => setMensagem(null), 5000);
@@ -384,8 +433,9 @@ function App() {
     if (sessao) carregarUso();
   }, [sessao, carregarUso]);
 
-  const executarBusca = async (forcar) => {
-    if (!formBusca.bairro.trim()) {
+  const executarBusca = async (forcar, formAlvo) => {
+    const alvo = formAlvo || formBusca;
+    if (!alvo.bairro || !String(alvo.bairro).trim()) {
       aviso('Informe pelo menos o bairro para buscar', 'erro');
       return;
     }
@@ -394,16 +444,17 @@ function App() {
     setInfoCache(null);
     setAnalises({});
     setContatoAberto(null);
-    gravarLocal(CHAVE_BUSCA, formBusca);
+    gravarLocal(CHAVE_BUSCA, alvo);
     try {
       const payload = Object.fromEntries(
-        Object.entries(formBusca).filter(([, v]) => String(v).trim() !== '')
+        Object.entries(alvo).filter(([, v]) => String(v).trim() !== '')
       );
       if (forcar) payload.forcar = '1';
       const res = await api.post('/buscar-anuncios', payload);
       setResultados(res.data.anuncios || []);
       setInfoCache({ do_cache: res.data.do_cache, buscado_em: res.data.buscado_em });
       carregarUso();
+      carregarHistorico();
     } catch (error) {
       tratarErro(error, 'Não foi possível concluir a busca agora');
       setResultados([]);
@@ -434,6 +485,51 @@ function App() {
     }
   };
 
+  const carregarSalvos = useCallback(async () => {
+    try {
+      const res = await api.get('/salvos');
+      const mapa = {};
+      (res.data || []).forEach((registro) => {
+        mapa[idDoAnuncio(registro, registro.id)] = registro;
+      });
+      setSalvos(mapa);
+    } catch (error) {
+      tratarErro(error, 'Não foi possível carregar os salvos');
+    }
+  }, [tratarErro]);
+
+  const carregarHistorico = useCallback(async () => {
+    try {
+      const res = await api.get('/historico');
+      setHistorico(res.data || []);
+    } catch (error) {
+      if (error?.response?.status === 401) sair();
+    }
+  }, [sair]);
+
+  // mudancas: { favorito } e/ou { status } e/ou { observacao }
+  const marcarAnuncio = async (anuncio, id, mudancas) => {
+    try {
+      const res = await api.post('/salvos', { anuncio, ...mudancas });
+      setSalvos((s) => ({ ...s, [id]: res.data }));
+    } catch (error) {
+      tratarErro(error, 'Não foi possível salvar a marcação');
+    }
+  };
+
+  const removerSalvo = async (chave, id) => {
+    try {
+      await api.delete(`/salvos/${chave}`);
+      setSalvos((s) => {
+        const copia = { ...s };
+        delete copia[id];
+        return copia;
+      });
+    } catch (error) {
+      tratarErro(error, 'Não foi possível remover');
+    }
+  };
+
   const carregarCarteira = useCallback(async () => {
     try {
       const res = await api.get('/imoveis');
@@ -446,6 +542,12 @@ function App() {
   useEffect(() => {
     if (sessao && aba === 'carteira') carregarCarteira();
   }, [sessao, aba, carregarCarteira]);
+
+  useEffect(() => {
+    if (!sessao) return;
+    carregarSalvos();
+    carregarHistorico();
+  }, [sessao, carregarSalvos, carregarHistorico]);
 
   const salvarNaCarteira = async (e) => {
     e.preventDefault();
@@ -513,7 +615,16 @@ function App() {
       return;
     }
     setContatoAberto((atual) => (atual === id ? null : id));
+    marcarAnuncio(anuncio, id, { status: 'contatado' });
     window.open(anuncio.link, '_blank', 'noopener');
+  };
+
+  // Reaproveita uma busca antiga: preenche o formulário e dispara de novo.
+  const repetirBusca = (criterios) => {
+    const alvo = { ...FORM_BUSCA_INICIAL, ...criterios };
+    setFormBusca(alvo);
+    setAba('buscar');
+    executarBusca(false, alvo);
   };
 
   if (!sessao) return <Login aoEntrar={entrar} />;
@@ -535,6 +646,9 @@ function App() {
           </div>
           <nav className="abas">
             <button className={aba === 'buscar' ? 'ativa' : ''} onClick={() => setAba('buscar')}>Buscar imóveis</button>
+            <button className={aba === 'salvos' ? 'ativa' : ''} onClick={() => setAba('salvos')}>
+              Salvos{Object.keys(salvos).length ? ` (${Object.keys(salvos).length})` : ''}
+            </button>
             <button className={aba === 'carteira' ? 'ativa' : ''} onClick={() => setAba('carteira')}>Minha carteira</button>
             <button className={aba === 'perfil' ? 'ativa' : ''} onClick={() => setAba('perfil')}>Meu perfil</button>
           </nav>
@@ -638,6 +752,25 @@ function App() {
               </form>
             </section>
 
+            {historico.length > 0 && !buscando ? (
+              <section className="painel">
+                <h2>Buscas recentes</h2>
+                <p className="ajuda">Clique para repetir. Busca repetida nas últimas horas sai do cache, sem custo.</p>
+                <div className="historico">
+                  {historico.map((h) => (
+                    <button key={h.id} className="chip" onClick={() => repetirBusca(h.criterios)}>
+                      <span className="chip-texto">
+                        {h.criterios.bairro}
+                        {h.criterios.cidade ? `, ${h.criterios.cidade}` : ''}
+                        {h.criterios.tipo ? ` · ${h.criterios.tipo}` : ''}
+                      </span>
+                      <span className="chip-meta">{h.resultados} · {quandoFoi(h.criado_em)}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
             {buscando ? (
               <section className="painel estado">
                 <div className="spinner" />
@@ -679,9 +812,13 @@ function App() {
                           perfilPreenchido={perfilPreenchido}
                           contatoAberto={contatoAberto === id}
                           copiado={copiado && copiado.startsWith(`${id}-`) ? copiado.slice(id.length + 1) : null}
+                          salvo={salvos[id]}
                           aoAnalisar={() => analisarAnuncio(anuncio, id)}
                           aoAbrirContato={() => abrirContato(anuncio, id)}
                           aoCopiar={(texto, rotulo) => copiar(texto, rotulo, id)}
+                          aoFavoritar={() => marcarAnuncio(anuncio, id, { favorito: !salvos[id]?.favorito })}
+                          aoMarcarStatus={(status) => marcarAnuncio(anuncio, id, { status })}
+                          aoContatar={() => marcarAnuncio(anuncio, id, { status: 'contatado' })}
                         />
                       );
                     })}
@@ -689,6 +826,107 @@ function App() {
                 )}
               </section>
             ) : null}
+          </>
+        ) : aba === 'salvos' ? (
+          <>
+            <section className="painel">
+              <h2>Anúncios salvos</h2>
+              <p className="ajuda">O que você favoritou e o que já contatou. Fica guardado mesmo depois que o anúncio sai do ar.</p>
+              <div className="filtros-chips">
+                {[
+                  ['todos', 'Todos'],
+                  ['favoritos', 'Favoritos'],
+                  ['aceita_parceria', 'Aceita parceria'],
+                  ['contatado', 'Contatados'],
+                  ['sem_resposta', 'Sem resposta'],
+                ].map(([valor, rotulo]) => (
+                  <button
+                    key={valor}
+                    className={`chip chip-filtro ${filtroSalvos === valor ? 'chip-ativo' : ''}`}
+                    onClick={() => setFiltroSalvos(valor)}
+                  >
+                    {rotulo}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="resultados">
+              {(() => {
+                const lista = Object.entries(salvos).filter(([, r]) => {
+                  if (filtroSalvos === 'todos') return true;
+                  if (filtroSalvos === 'favoritos') return Boolean(r.favorito);
+                  return r.status === filtroSalvos;
+                });
+
+                if (lista.length === 0) {
+                  return (
+                    <div className="painel estado">
+                      <p>Nada aqui ainda. Favorite um anúncio na busca ou marque a situação depois de contatar.</p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="lista">
+                    {lista.map(([id, registro]) => {
+                      const anuncio = registro.dados || registro;
+                      return (
+                        <article className={`card ${registro.status ? `card-${registro.status}` : ''}`} key={registro.chave}>
+                          <div className="card-cabecalho">
+                            <div>
+                              <h3>{registro.titulo}</h3>
+                              <p className="local">
+                                {registro.bairro}
+                                {registro.cidade ? `, ${registro.cidade}` : ''}
+                              </p>
+                            </div>
+                            <div className="card-canto">
+                              <button
+                                className={`estrela ${registro.favorito ? 'estrela-ativa' : ''}`}
+                                onClick={() => marcarAnuncio(anuncio, id, { favorito: !registro.favorito })}
+                                aria-label="Favoritar"
+                              >
+                                {registro.favorito ? '★' : '☆'}
+                              </button>
+                              <span className="portal">{registro.site_origem}</span>
+                            </div>
+                          </div>
+
+                          <p className="preco">{formatarPreco(registro.preco)}</p>
+
+                          <ControleStatus
+                            salvo={registro}
+                            aoMarcarStatus={(status) => marcarAnuncio(anuncio, id, { status })}
+                          />
+
+                          {registro.contatado_em ? (
+                            <p className="marca-tempo">Contatado {quandoFoi(registro.contatado_em)}</p>
+                          ) : null}
+
+                          <div className="card-acoes">
+                            {montarLinkWhatsApp(anuncio.telefone, registro.titulo) ? (
+                              <a className="btn btn-zap" target="_blank" rel="noreferrer"
+                                href={montarLinkWhatsApp(anuncio.telefone, registro.titulo)}>
+                                Falar no WhatsApp
+                              </a>
+                            ) : null}
+                            {registro.link ? (
+                              <a className="btn btn-secundario" href={registro.link} target="_blank" rel="noreferrer">
+                                Ver anúncio
+                              </a>
+                            ) : null}
+                            <button className="btn btn-texto btn-perigo" onClick={() => removerSalvo(registro.chave, id)}>
+                              Remover
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </section>
           </>
         ) : aba === 'perfil' ? (
           <section className="painel">
