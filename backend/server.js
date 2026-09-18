@@ -15,14 +15,46 @@ const app = express();
 // Railway fica atrás de proxy: sem isso o rate limit enxerga todo mundo como um IP só
 app.set('trust proxy', 1);
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT || 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
+// Uma URL de conexão tem precedência sobre as variáveis soltas. É assim que o
+// banco gerenciado do Railway entrega a credencial, e evita espalhar segredo
+// em cinco variáveis diferentes.
+const URL_BANCO = process.env.MYSQL_URL || process.env.DATABASE_URL || '';
+
+const pool = mysql.createPool(
+  URL_BANCO
+    ? {
+        uri: URL_BANCO,
+        waitForConnections: true,
+        connectionLimit: 10,
+        connectTimeout: 15000,
+      }
+    : {
+        host: process.env.DB_HOST,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME,
+        port: process.env.DB_PORT || 3306,
+        waitForConnections: true,
+        connectionLimit: 10,
+        connectTimeout: 15000,
+      }
+);
+
+console.log(URL_BANCO ? 'Banco: usando URL de conexao' : 'Banco: usando variaveis DB_HOST/DB_USER/...');
+
+// Diagnóstico rápido do banco sem precisar abrir log: /health/db
+app.get('/health/db', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT 1 AS ok');
+    res.json({ banco: 'ok', origem: URL_BANCO ? 'url' : 'variaveis', resultado: rows[0].ok });
+  } catch (error) {
+    res.status(503).json({
+      banco: 'falhou',
+      origem: URL_BANCO ? 'url' : 'variaveis',
+      codigo: error.code || null,
+      detalhe: (error.sqlMessage || error.message || '').slice(0, 200),
+    });
+  }
 });
 
 const client = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
