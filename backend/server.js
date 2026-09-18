@@ -38,10 +38,59 @@ function inteiroEntre(valor, padrao, minimo, maximo) {
 // Inteiros validados aqui porque alguns vão direto no SQL (nunca vêm do usuário).
 const CACHE_HORAS = inteiroEntre(process.env.CACHE_HORAS, 6, 1, 168);
 const ANALISE_CACHE_HORAS = inteiroEntre(process.env.ANALISE_CACHE_HORAS, 24, 1, 168);
-const LIMITE_BUSCAS_DIA = inteiroEntre(process.env.LIMITE_BUSCAS_DIA, 40, 1, 1000);
-const LIMITE_ANALISES_DIA = inteiroEntre(process.env.LIMITE_ANALISES_DIA, 60, 1, 1000);
-const LIMITE_ALERTAS = inteiroEntre(process.env.LIMITE_ALERTAS, 5, 1, 50);
 const CODIGO_CONVITE = process.env.CODIGO_CONVITE || '';
+// Enquanto o pagamento não está ligado, só este email troca plano de alguém.
+const EMAIL_ADMIN = String(process.env.EMAIL_ADMIN || '').trim().toLowerCase();
+const DIAS_TESTE = inteiroEntre(process.env.DIAS_TESTE, 14, 1, 365);
+
+// ============ PLANOS ============
+// Cota é MENSAL, não diária: teto diário não controla custo de verdade
+// (40 buscas por dia dariam mais de mil reais de custo no mês).
+// Custo aproximado por busca hoje: R$ 1. Por análise: centavos.
+// O cache é compartilhado entre contas, então equipe grande custa menos por pessoa.
+
+const PLANOS = {
+  teste: {
+    nome: 'Teste',
+    preco: 0,
+    buscas_mes: 15,
+    analises_mes: 10,
+    alertas: 1,
+    contas: 1,
+    descricao: `${DIAS_TESTE} dias para experimentar`,
+  },
+  corretor: {
+    nome: 'Corretor',
+    preco: 149,
+    buscas_mes: 60,
+    analises_mes: 20,
+    alertas: 2,
+    contas: 1,
+    descricao: 'Para o corretor que trabalha sozinho',
+  },
+  equipe: {
+    nome: 'Equipe',
+    preco: 497,
+    buscas_mes: 250,
+    analises_mes: 80,
+    alertas: 8,
+    contas: 5,
+    descricao: 'Para equipes pequenas, cota compartilhada',
+  },
+  imobiliaria: {
+    nome: 'Imobiliária',
+    preco: 1190,
+    buscas_mes: 700,
+    analises_mes: 200,
+    alertas: 20,
+    contas: 15,
+    descricao: 'Para a imobiliária inteira',
+  },
+};
+
+function limitesDoPlano(plano) {
+  return PLANOS[plano] || PLANOS.teste;
+}
 
 // Sem segredo fixo, todo deploy derruba os logins. Avisa alto em vez de falhar calado.
 const JWT_SEGREDO = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
@@ -210,14 +259,15 @@ async function prepararBanco() {
       )
     `);
 
+    // Cota é por conta principal e por mês. A competência é sempre o dia 1.
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS uso_diario (
+      CREATE TABLE IF NOT EXISTS uso_mensal (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        usuario_id INT NOT NULL,
-        dia DATE NOT NULL,
+        conta_id INT NOT NULL,
+        competencia DATE NOT NULL,
         buscas INT NOT NULL DEFAULT 0,
         analises INT NOT NULL DEFAULT 0,
-        UNIQUE KEY uk_usuario_dia (usuario_id, dia)
+        UNIQUE KEY uk_conta_competencia (conta_id, competencia)
       )
     `);
 
@@ -276,6 +326,24 @@ async function prepararBanco() {
       )
     `);
 
+    // Assinatura e equipe. Conta principal é quem paga; membros herdam o plano dela.
+    if (!(await colunaExiste('usuarios', 'conta_principal_id'))) {
+      await pool.query('ALTER TABLE usuarios ADD COLUMN conta_principal_id INT NULL');
+      await pool.query('ALTER TABLE usuarios ADD INDEX idx_usuarios_conta (conta_principal_id)');
+      console.log('Coluna conta_principal_id criada em usuarios.');
+    }
+    if (!(await colunaExiste('usuarios', 'plano_expira_em'))) {
+      await pool.query('ALTER TABLE usuarios ADD COLUMN plano_expira_em DATE NULL');
+      await pool.query("ALTER TABLE usuarios ADD COLUMN status_assinatura VARCHAR(20) NOT NULL DEFAULT 'teste'");
+      // Contas que já existiam entram no período de teste a partir de hoje.
+      await pool.query(
+        `UPDATE usuarios SET plano = 'teste', status_assinatura = 'teste',
+         plano_expira_em = DATE_ADD(CURDATE(), INTERVAL ${DIAS_TESTE} DAY)
+         WHERE plano_expira_em IS NULL`
+      );
+      console.log('Colunas de assinatura criadas em usuarios.');
+    }
+
     if (!(await colunaExiste('usuarios', 'notificar_email'))) {
       await pool.query('ALTER TABLE usuarios ADD COLUMN notificar_email BOOLEAN NOT NULL DEFAULT TRUE');
       await pool.query('ALTER TABLE usuarios ADD COLUMN email_notificacao VARCHAR(160) NULL');
@@ -291,7 +359,7 @@ async function prepararBanco() {
 
     await pool.query('DELETE FROM buscas_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
     await pool.query('DELETE FROM analises_cache WHERE criado_em < (NOW() - INTERVAL 7 DAY)');
-    console.log(`Banco pronto. Cache: ${CACHE_HORAS}h. Teto: ${LIMITE_BUSCAS_DIA} buscas/dia.`);
+    console.log(`Banco pronto. Cache: ${CACHE_HORAS}h. Planos: ${Object.keys(PLANOS).join(', ')}.`);
   } catch (error) {
     console.error('Falha ao preparar o banco:', error.message);
   }
@@ -314,15 +382,52 @@ async function autenticar(req, res, next) {
 
   try {
     const dados = jwt.verify(token, JWT_SEGREDO);
-    const [rows] = await pool.query('SELECT id, nome_imobiliaria, email, plano, ativo FROM usuarios WHERE id = ?', [dados.id]);
+    const [rows] = await pool.query(
+      'SELECT id, nome_imobiliaria, email, plano, ativo, conta_principal_id FROM usuarios WHERE id = ?',
+      [dados.id]
+    );
     if (rows.length === 0 || !rows[0].ativo) {
       return res.status(401).json({ erro: 'Conta inativa ou inexistente' });
     }
     req.usuario = rows[0];
+
+    // Quem paga é a conta principal. Membro de equipe herda plano e cota dela.
+    const contaId = rows[0].conta_principal_id || rows[0].id;
+    const [contaRows] = await pool.query(
+      'SELECT id, nome_imobiliaria, email, plano, plano_expira_em, status_assinatura FROM usuarios WHERE id = ?',
+      [contaId]
+    );
+    const conta = contaRows[0] || rows[0];
+    req.conta = {
+      ...conta,
+      limites: limitesDoPlano(conta.plano),
+      ehDono: !rows[0].conta_principal_id,
+      vencida: assinaturaVencida(conta),
+    };
     next();
   } catch {
     return res.status(401).json({ erro: 'Sessão expirada. Faça login de novo.' });
   }
+}
+
+function assinaturaVencida(conta) {
+  if (conta.status_assinatura === 'cancelada') return true;
+  if (!conta.plano_expira_em) return false;
+  const hoje = new Date();
+  hoje.setHours(0, 0, 0, 0);
+  return new Date(conta.plano_expira_em) < hoje;
+}
+
+// Bloqueia só o que custa dinheiro. Ler o que já foi salvo continua liberado,
+// senão o corretor perde acesso ao próprio histórico por causa de um boleto.
+function exigirAssinatura(req, res, next) {
+  if (req.conta.vencida) {
+    return res.status(402).json({
+      erro: 'Assinatura vencida. Renove para voltar a buscar e analisar.',
+      assinatura_vencida: true,
+    });
+  }
+  next();
 }
 
 const limitePorIp = rateLimit({
@@ -343,21 +448,54 @@ const limiteLogin = rateLimit({
 
 app.use('/api', limitePorIp);
 
-// Teto diário por usuário: é o freio de mão do custo de API.
-async function consumirCota(usuarioId, campo, teto) {
+// Cota mensal da conta: é o freio de mão do custo de API.
+const COMPETENCIA = "DATE_FORMAT(CURDATE(), '%Y-%m-01')";
+
+async function lerUso(contaId) {
   const [rows] = await pool.query(
-    'SELECT buscas, analises FROM uso_diario WHERE usuario_id = ? AND dia = CURDATE()',
-    [usuarioId]
+    `SELECT buscas, analises FROM uso_mensal WHERE conta_id = ? AND competencia = ${COMPETENCIA}`,
+    [contaId]
   );
-  const usado = rows.length > 0 ? rows[0][campo] : 0;
-  if (usado >= teto) return false;
+  return rows[0] || { buscas: 0, analises: 0 };
+}
+
+async function consumirCota(contaId, campo, teto) {
+  const uso = await lerUso(contaId);
+  if (uso[campo] >= teto) return false;
 
   await pool.query(
-    `INSERT INTO uso_diario (usuario_id, dia, ${campo}) VALUES (?, CURDATE(), 1)
+    `INSERT INTO uso_mensal (conta_id, competencia, ${campo}) VALUES (?, ${COMPETENCIA}, 1)
      ON DUPLICATE KEY UPDATE ${campo} = ${campo} + 1`,
-    [usuarioId]
+    [contaId]
   );
   return true;
+}
+
+// Resolve a conta pagante de um usuário. Usado fora das rotas (agendador).
+async function contaDoUsuario(usuarioId) {
+  const [rows] = await pool.query(
+    `SELECT c.id, c.plano, c.plano_expira_em, c.status_assinatura
+     FROM usuarios u
+     JOIN usuarios c ON c.id = COALESCE(u.conta_principal_id, u.id)
+     WHERE u.id = ?`,
+    [usuarioId]
+  );
+  if (rows.length === 0) return null;
+  return { ...rows[0], limites: limitesDoPlano(rows[0].plano), vencida: assinaturaVencida(rows[0]) };
+}
+
+// Ponto único de ativação. Ligar o Mercado Pago depois é chamar esta função
+// do webhook de pagamento aprovado. Nada mais precisa mudar.
+async function ativarAssinatura(contaId, plano, meses = 1) {
+  if (!PLANOS[plano]) throw new Error('Plano inexistente: ' + plano);
+  await pool.query(
+    `UPDATE usuarios
+     SET plano = ?, status_assinatura = 'ativa',
+         plano_expira_em = DATE_ADD(GREATEST(COALESCE(plano_expira_em, CURDATE()), CURDATE()), INTERVAL ? MONTH)
+     WHERE id = ?`,
+    [plano, inteiroEntre(meses, 1, 1, 24), contaId]
+  );
+  console.log(`Assinatura ativada: conta ${contaId}, plano ${plano}, +${meses} mes(es)`);
 }
 
 app.post('/api/auth/registrar', limiteLogin, async (req, res) => {
@@ -385,7 +523,8 @@ app.post('/api/auth/registrar', limiteLogin, async (req, res) => {
 
     const senhaHash = await bcrypt.hash(String(senha), 10);
     const [result] = await pool.query(
-      'INSERT INTO usuarios (nome_imobiliaria, email, senha_hash) VALUES (?, ?, ?)',
+      `INSERT INTO usuarios (nome_imobiliaria, email, senha_hash, plano, status_assinatura, plano_expira_em)
+       VALUES (?, ?, ?, 'teste', 'teste', DATE_ADD(CURDATE(), INTERVAL ${DIAS_TESTE} DAY))`,
       [String(nome_imobiliaria).trim(), emailLimpo, senhaHash]
     );
 
@@ -418,30 +557,134 @@ app.post('/api/auth/login', limiteLogin, async (req, res) => {
 
 app.get('/api/auth/eu', autenticar, async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      'SELECT buscas, analises FROM uso_diario WHERE usuario_id = ? AND dia = CURDATE()',
-      [req.usuario.id]
-    );
-    const [conta] = await pool.query(
+    const [pref] = await pool.query(
       'SELECT notificar_email, email_notificacao FROM usuarios WHERE id = ?',
       [req.usuario.id]
     );
-    const uso = rows[0] || { buscas: 0, analises: 0 };
+    const uso = await lerUso(req.conta.id);
+    const lim = req.conta.limites;
+
     res.json({
       usuario: req.usuario,
       notificacoes: {
-        notificar_email: conta[0] ? Boolean(conta[0].notificar_email) : true,
-        email_notificacao: conta[0] ? conta[0].email_notificacao : null,
+        notificar_email: pref[0] ? Boolean(pref[0].notificar_email) : true,
+        email_notificacao: pref[0] ? pref[0].email_notificacao : null,
         email_ligado: emailLigado,
       },
-      uso_hoje: {
+      assinatura: {
+        plano: req.conta.plano,
+        plano_nome: lim.nome,
+        status: req.conta.status_assinatura,
+        expira_em: req.conta.plano_expira_em,
+        vencida: req.conta.vencida,
+        eh_dono: req.conta.ehDono,
+        limites: lim,
+      },
+      uso_mes: {
         buscas: uso.buscas,
-        buscas_restantes: Math.max(LIMITE_BUSCAS_DIA - uso.buscas, 0),
+        buscas_restantes: Math.max(lim.buscas_mes - uso.buscas, 0),
+        buscas_limite: lim.buscas_mes,
         analises: uso.analises,
-        analises_restantes: Math.max(LIMITE_ANALISES_DIA - uso.analises, 0),
+        analises_restantes: Math.max(lim.analises_mes - uso.analises, 0),
+        analises_limite: lim.analises_mes,
       },
     });
   } catch (error) { falhou(res, 'eu', error); }
+});
+
+// Catálogo público: a tela de planos lê daqui, não tem preço no frontend.
+app.get('/api/planos', (req, res) => {
+  res.json({
+    planos: Object.entries(PLANOS).map(([id, p]) => ({ id, ...p })),
+    dias_teste: DIAS_TESTE,
+    pagamento_ligado: false,
+  });
+});
+
+app.get('/api/equipe', autenticar, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, nome_imobiliaria, email, ativo, criado_em FROM usuarios
+       WHERE conta_principal_id = ? ORDER BY criado_em`,
+      [req.conta.id]
+    );
+    res.json({
+      membros: rows,
+      limite_contas: req.conta.limites.contas,
+      usadas: rows.length + 1,
+      eh_dono: req.conta.ehDono,
+    });
+  } catch (error) { falhou(res, 'listar equipe', error); }
+});
+
+app.post('/api/equipe', autenticar, async (req, res) => {
+  try {
+    if (!req.conta.ehDono) return res.status(403).json({ erro: 'Só a conta principal pode adicionar corretores.' });
+
+    const { nome, email, senha } = req.body;
+    if (!nome || !email || !senha) return res.status(400).json({ erro: 'Informe nome, email e senha.' });
+    if (String(senha).length < 8) return res.status(400).json({ erro: 'A senha precisa ter pelo menos 8 caracteres.' });
+
+    const [membros] = await pool.query('SELECT COUNT(*) AS total FROM usuarios WHERE conta_principal_id = ?', [req.conta.id]);
+    if (membros[0].total + 1 >= req.conta.limites.contas) {
+      return res.status(403).json({
+        erro: `O plano ${req.conta.limites.nome} permite ${req.conta.limites.contas} conta(s). Mude de plano para adicionar mais.`,
+      });
+    }
+
+    const emailLimpo = String(email).trim().toLowerCase();
+    const [existe] = await pool.query('SELECT id FROM usuarios WHERE email = ?', [emailLimpo]);
+    if (existe.length > 0) return res.status(409).json({ erro: 'Já existe uma conta com esse email.' });
+
+    const senhaHash = await bcrypt.hash(String(senha), 10);
+    const [result] = await pool.query(
+      'INSERT INTO usuarios (nome_imobiliaria, email, senha_hash, conta_principal_id) VALUES (?, ?, ?, ?)',
+      [String(nome).trim(), emailLimpo, senhaHash, req.conta.id]
+    );
+
+    res.status(201).json({ id: result.insertId, nome_imobiliaria: String(nome).trim(), email: emailLimpo, ativo: 1 });
+  } catch (error) { falhou(res, 'criar membro', error); }
+});
+
+app.delete('/api/equipe/:id', autenticar, async (req, res) => {
+  try {
+    if (!req.conta.ehDono) return res.status(403).json({ erro: 'Só a conta principal pode remover corretores.' });
+    const [result] = await pool.query(
+      'DELETE FROM usuarios WHERE id = ? AND conta_principal_id = ?',
+      [req.params.id, req.conta.id]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ erro: 'Não encontrado' });
+    res.json({ ok: true });
+  } catch (error) { falhou(res, 'remover membro', error); }
+});
+
+// Checkout: fica pronto esperando o Mercado Pago. Quando ligar, é aqui que
+// se cria a preferência de pagamento e se devolve a URL para o navegador.
+app.post('/api/assinatura/checkout', autenticar, async (req, res) => {
+  const { plano } = req.body;
+  if (!PLANOS[plano]) return res.status(400).json({ erro: 'Plano inexistente.' });
+  if (!req.conta.ehDono) return res.status(403).json({ erro: 'Só a conta principal pode assinar.' });
+
+  return res.status(501).json({
+    erro: 'Pagamento ainda não conectado. Fale com o suporte para ativar o plano manualmente.',
+    plano,
+    valor: PLANOS[plano].preco,
+    pagamento_ligado: false,
+  });
+});
+
+// Troca manual de plano enquanto o pagamento não está ligado.
+app.post('/api/assinatura/ativar', autenticar, async (req, res) => {
+  try {
+    if (!EMAIL_ADMIN || req.usuario.email !== EMAIL_ADMIN) {
+      return res.status(403).json({ erro: 'Sem permissão.' });
+    }
+    const { conta_id, plano, meses } = req.body;
+    if (!PLANOS[plano]) return res.status(400).json({ erro: 'Plano inexistente.' });
+
+    await ativarAssinatura(conta_id || req.conta.id, plano, meses || 1);
+    res.json({ ok: true });
+  } catch (error) { falhou(res, 'ativar assinatura', error); }
 });
 
 app.put('/api/auth/notificacoes', autenticar, async (req, res) => {
@@ -854,11 +1097,7 @@ app.get('/api/resumo', autenticar, async (req, res) => {
       [id]
     );
 
-    const [uso] = await pool.query(
-      'SELECT buscas, analises FROM uso_diario WHERE usuario_id = ? AND dia = CURDATE()',
-      [id]
-    );
-    const usoHoje = uso[0] || { buscas: 0, analises: 0 };
+    const usoMes = await lerUso(req.conta.id);
 
     const novosPorAlerta = alertasAtivos
       .map((a) => ({
@@ -878,9 +1117,11 @@ app.get('/api/resumo', autenticar, async (req, res) => {
       alertas_ativos: alertasAtivos.length,
       dias_sem_resposta: DIAS_SEM_RESPOSTA,
       dias_parceria_parada: DIAS_PARCERIA_PARADA,
-      uso_hoje: {
-        buscas: usoHoje.buscas,
-        buscas_restantes: Math.max(LIMITE_BUSCAS_DIA - usoHoje.buscas, 0),
+      assinatura_vencida: req.conta.vencida,
+      uso_mes: {
+        buscas: usoMes.buscas,
+        buscas_restantes: Math.max(req.conta.limites.buscas_mes - usoMes.buscas, 0),
+        buscas_limite: req.conta.limites.buscas_mes,
       },
     });
   } catch (error) { falhou(res, 'resumo do dia', error); }
@@ -990,7 +1231,7 @@ function chaveDaAnalise(im) {
 
 // Ordem que importa: cache primeiro, cota depois, IA por último.
 // Assim resultado guardado nunca consome a cota diária do corretor.
-async function obterAnalise(usuarioId, im) {
+async function obterAnalise(conta, im) {
   const chave = chaveDaAnalise(im);
 
   try {
@@ -1007,9 +1248,13 @@ async function obterAnalise(usuarioId, im) {
     console.error('Falha ao ler cache de analise (seguindo sem ele):', error.message);
   }
 
-  const temCota = await consumirCota(usuarioId, 'analises', LIMITE_ANALISES_DIA);
+  const temCota = await consumirCota(conta.id, 'analises', conta.limites.analises_mes);
   if (!temCota) {
-    return { ok: false, status: 429, erro: `Limite de ${LIMITE_ANALISES_DIA} análises por dia atingido.` };
+    return {
+      ok: false,
+      status: 429,
+      erro: `Você usou as ${conta.limites.analises_mes} análises do mês no plano ${conta.limites.nome}.`,
+    };
   }
 
   const resposta = await analisarPreco(im);
@@ -1023,13 +1268,13 @@ async function obterAnalise(usuarioId, im) {
   return { ok: true, resposta: { ...resposta, do_cache: false, analisado_em: new Date() } };
 }
 
-app.post('/api/imoveis/:id/analisar', autenticar, async (req, res) => {
+app.post('/api/imoveis/:id/analisar', autenticar, exigirAssinatura, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM imoveis WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
 
     const im = rows[0];
-    const r = await obterAnalise(req.usuario.id, {
+    const r = await obterAnalise(req.conta, {
       titulo: im.titulo, preco: im.preco, bairro: im.bairro, tipo: im.tipo,
       quartos: im.quartos, banheiros: im.banheiros, area_m2: im.area_m2, descricao: im.descricao,
     });
@@ -1057,12 +1302,12 @@ app.get('/api/imoveis/:id/analise', autenticar, async (req, res) => {
 });
 
 // Análise avulsa: recebe os dados direto no corpo, sem precisar estar salvo no banco
-app.post('/api/analisar-avulso', autenticar, async (req, res) => {
+app.post('/api/analisar-avulso', autenticar, exigirAssinatura, async (req, res) => {
   try {
     const { titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao } = req.body;
     if (!titulo || !preco || !bairro) return res.status(400).json({ erro: 'Dados insuficientes para análise' });
 
-    const r = await obterAnalise(req.usuario.id, { titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao });
+    const r = await obterAnalise(req.conta, { titulo, preco, bairro, tipo, quartos, banheiros, area_m2, descricao });
     if (!r.ok) return res.status(r.status).json({ erro: r.erro });
     res.json(r.resposta);
   } catch (error) { falhou(res, 'analise avulsa', error); }
@@ -1070,7 +1315,7 @@ app.post('/api/analisar-avulso', autenticar, async (req, res) => {
 
 // ============ BUSCA ============
 
-app.post('/api/buscar-anuncios', autenticar, async (req, res) => {
+app.post('/api/buscar-anuncios', autenticar, exigirAssinatura, async (req, res) => {
   try {
     const entrada = { ...req.query, ...req.body };
     const criterios = somenteCriterios(entrada);
@@ -1090,9 +1335,12 @@ app.post('/api/buscar-anuncios', autenticar, async (req, res) => {
       }
     }
 
-    const temCota = await consumirCota(req.usuario.id, 'buscas', LIMITE_BUSCAS_DIA);
+    const temCota = await consumirCota(req.conta.id, 'buscas', req.conta.limites.buscas_mes);
     if (!temCota) {
-      return res.status(429).json({ erro: `Limite de ${LIMITE_BUSCAS_DIA} buscas por dia atingido. Volta amanhã.` });
+      return res.status(429).json({
+        erro: `Você usou as ${req.conta.limites.buscas_mes} buscas do mês no plano ${req.conta.limites.nome}. A cota volta no dia 1.`,
+        cota_esgotada: true,
+      });
     }
 
     console.log(`Cache MISS ${chave.slice(0, 8)} (${criterios.bairro}), consultando a IA`);
@@ -1137,9 +1385,16 @@ app.post('/api/alertas', autenticar, async (req, res) => {
     const limpos = somenteCriterios(criterios || {});
     if (!limpos.bairro) return res.status(400).json({ erro: 'O alerta precisa pelo menos do bairro.' });
 
-    const [contagem] = await pool.query('SELECT COUNT(*) AS total FROM alertas WHERE usuario_id = ?', [req.usuario.id]);
-    if (contagem[0].total >= LIMITE_ALERTAS) {
-      return res.status(403).json({ erro: `Seu plano permite ${LIMITE_ALERTAS} alertas. Apague um para criar outro.` });
+    const [contagem] = await pool.query(
+      `SELECT COUNT(*) AS total FROM alertas a
+       JOIN usuarios u ON u.id = a.usuario_id
+       WHERE COALESCE(u.conta_principal_id, u.id) = ?`,
+      [req.conta.id]
+    );
+    if (contagem[0].total >= req.conta.limites.alertas) {
+      return res.status(403).json({
+        erro: `O plano ${req.conta.limites.nome} permite ${req.conta.limites.alertas} busca(s) agendada(s). Apague uma ou mude de plano.`,
+      });
     }
 
     const nomeFinal = String(nome || '').trim() || `${limpos.bairro}${limpos.cidade ? ', ' + limpos.cidade : ''}`;
@@ -1184,14 +1439,14 @@ app.delete('/api/alertas/:id', autenticar, async (req, res) => {
 });
 
 // Rodar na hora, sem esperar o horário. Consome cota como qualquer busca.
-app.post('/api/alertas/:id/rodar', autenticar, async (req, res) => {
+app.post('/api/alertas/:id/rodar', autenticar, exigirAssinatura, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM alertas WHERE id = ? AND usuario_id = ?', [req.params.id, req.usuario.id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Não encontrado' });
 
-    const temCota = await consumirCota(req.usuario.id, 'buscas', LIMITE_BUSCAS_DIA);
+    const temCota = await consumirCota(req.conta.id, 'buscas', req.conta.limites.buscas_mes);
     if (!temCota) {
-      return res.status(429).json({ erro: `Limite de ${LIMITE_BUSCAS_DIA} buscas por dia atingido.` });
+      return res.status(429).json({ erro: `Você usou as ${req.conta.limites.buscas_mes} buscas do mês.` });
     }
 
     const atualizado = await rodarAlerta(rows[0]);
@@ -1280,11 +1535,20 @@ async function processarAlertas() {
 
     console.log(`Processando ${rows.length} alerta(s) agendado(s)`);
     for (const alerta of rows) {
-      const temCota = await consumirCota(alerta.usuario_id, 'buscas', LIMITE_BUSCAS_DIA);
+      const conta = await contaDoUsuario(alerta.usuario_id);
+      if (!conta || conta.vencida) {
+        await pool.query('UPDATE alertas SET ultima_execucao = NOW(), erro = ? WHERE id = ?', [
+          'Assinatura vencida',
+          alerta.id,
+        ]);
+        continue;
+      }
+
+      const temCota = await consumirCota(conta.id, 'buscas', conta.limites.buscas_mes);
       if (!temCota) {
         // Marca como executado para não ficar tentando o dia inteiro.
         await pool.query('UPDATE alertas SET ultima_execucao = NOW(), erro = ? WHERE id = ?', [
-          'Cota diaria de buscas esgotada',
+          'Cota mensal de buscas esgotada',
           alerta.id,
         ]);
         continue;
