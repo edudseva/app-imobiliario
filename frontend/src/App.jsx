@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import './App.css';
 import './complementos.css';
@@ -33,7 +33,15 @@ const gravarLocal = (chave, valor) => {
 
 // ============ API ============
 
-const api = axios.create({ baseURL: API_BASE });
+// Sem timeout o axios espera para sempre: foi o "carregando infinito".
+// Chamadas comuns são rápidas; a busca tem prazo próprio, bem maior.
+const TIMEOUT_PADRAO = 45000;
+const TIMEOUT_BUSCA = 240000;
+
+const api = axios.create({ baseURL: API_BASE, timeout: TIMEOUT_PADRAO });
+
+const ehTempoEsgotado = (error) =>
+  error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '');
 
 api.interceptors.request.use((config) => {
   try {
@@ -59,6 +67,27 @@ const formatarPreco = (valor) => {
     maximumFractionDigits: 0,
   });
 };
+
+// Aluguel mostra o valor mensal; venda (padrão) mostra só o valor.
+const formatarPrecoAnuncio = (anuncio) => {
+  const texto = formatarPreco(anuncio?.preco);
+  return anuncio?.negocio === 'aluguel' && anuncio?.preco ? `${texto}/mês` : texto;
+};
+
+// Guarda só dígitos no estado e exibe no formato R$ 1.000.000 enquanto digita.
+function InputMoeda({ value, onChange, placeholder }) {
+  const digitos = String(value || '').replace(/\D/g, '');
+  const exibido = digitos ? `R$ ${Number(digitos).toLocaleString('pt-BR')}` : '';
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      placeholder={placeholder || 'R$ 0'}
+      value={exibido}
+      onChange={(e) => onChange(e.target.value.replace(/\D/g, '').replace(/^0+/, ''))}
+    />
+  );
+}
 
 const montarLinkWhatsApp = (telefone, titulo) => {
   if (!telefone) return null;
@@ -86,6 +115,15 @@ const primeiroNome = (nome) => String(nome || '').trim().split(/\s+/)[0] || '';
 const dataPorExtenso = () =>
   new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
 
+// Previsão em linguagem de gente. Passou da estimativa, para de prometer prazo.
+const textoPrevisao = (segundos, estimativa) => {
+  const restam = (estimativa || 45) - segundos;
+  if (restam > 25) return `cerca de ${Math.round(restam / 5) * 5}s restantes`;
+  if (restam > 8) return 'quase lá';
+  if (restam > -30) return 'terminando';
+  return 'esta busca está mais difícil que o normal';
+};
+
 const quandoFoi = (data) => {
   if (!data) return '';
   const minutos = Math.round((Date.now() - new Date(data).getTime()) / 60000);
@@ -112,17 +150,29 @@ const ROTULOS_CRITERIOS = {
 };
 
 const resumoCriterios = (c) => {
-  const partes = [c.bairro];
+  const partes = [c.negocio === 'aluguel' ? 'Aluguel' : 'Compra', c.consulta || c.bairro];
   Object.entries(ROTULOS_CRITERIOS).forEach(([campo, rotulo]) => {
-    if (c[campo]) partes.push(`${rotulo}: ${c[campo]}`);
+    if (!c[campo]) return;
+    const valor = campo === 'preco_min' || campo === 'preco_max'
+      ? Number(c[campo]).toLocaleString('pt-BR')
+      : c[campo];
+    partes.push(`${rotulo}: ${valor}`);
   });
   return partes.filter(Boolean).join(' · ');
 };
 
 const FORM_BUSCA_INICIAL = {
+  negocio: 'venda',
+  consulta: '',
   cidade: '', bairro: '', tipo: '', preco_min: '', preco_max: '',
   quartos_min: '', banheiros_min: '', vagas_min: '', area_min: '', area_max: '', detalhes: '',
 };
+
+const EXEMPLOS_BUSCA = [
+  'apartamento 2 quartos Águas Claras até 400 mil',
+  'casa com 3 vagas no Lago Sul',
+  'kitnet mobiliada perto do metrô Guará',
+];
 
 const FORM_PERFIL_INICIAL = {
   nome: '',
@@ -337,7 +387,7 @@ function ItemPendencia({ registro, aoMudarStatus }) {
       <div className="pendencia-info">
         <span className="pendencia-titulo">{registro.titulo}</span>
         <span className="pendencia-meta">
-          {formatarPreco(registro.preco)}
+          {formatarPrecoAnuncio({ ...anuncio, preco: registro.preco })}
           {registro.site_origem ? ` · ${registro.site_origem}` : ''}
           {registro.contatado_em ? ` · contatado ${quandoFoi(registro.contatado_em)}` : ''}
         </span>
@@ -391,7 +441,7 @@ function CartaoResultado({ anuncio, analise, analisando, perfil, perfilPreenchid
         </div>
       </div>
 
-      <p className="preco">{formatarPreco(anuncio.preco)}</p>
+      <p className="preco">{formatarPrecoAnuncio(anuncio)}</p>
 
       <ul className="specs">
         {anuncio.quartos ? <li>{anuncio.quartos} quartos</li> : null}
@@ -454,7 +504,21 @@ function App() {
 
   const [formBusca, setFormBusca] = useState(() => lerLocal(CHAVE_BUSCA, FORM_BUSCA_INICIAL));
   const [buscando, setBuscando] = useState(false);
+  const [atualizando, setAtualizando] = useState(false);
+  const [maisFiltros, setMaisFiltros] = useState(false);
   const [segundos, setSegundos] = useState(0);
+  const [estimativa, setEstimativa] = useState(45);
+
+  // Guarda o intervalo do acompanhamento para poder parar de qualquer lugar.
+  const pollRef = useRef(null);
+  const pararPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+  // Sair da tela não pode deixar um intervalo rodando para sempre.
+  useEffect(() => () => pararPolling(), []);
   const [resultados, setResultados] = useState(null);
   const [infoCache, setInfoCache] = useState(null);
   const [analises, setAnalises] = useState({});
@@ -528,34 +592,105 @@ function App() {
     if (sessao) carregarUso();
   }, [sessao, carregarUso]);
 
+  // A busca agora é assíncrona: o servidor devolve um id na hora e a gente
+  // pergunta o andamento. Enquanto isso a tela já mostra o resultado anterior,
+  // se houver, em vez de ficar branca.
   const executarBusca = async (forcar, formAlvo) => {
     const alvo = formAlvo || formBusca;
-    if (!alvo.bairro || !String(alvo.bairro).trim()) {
-      aviso('Informe pelo menos o bairro para buscar', 'erro');
+    const temTexto = String(alvo.consulta || '').trim();
+    const temBairro = String(alvo.bairro || '').trim();
+    if (!temTexto && !temBairro) {
+      aviso('Escreva o que você procura. Exemplo: apartamento 2 quartos Águas Claras até 400 mil', 'erro');
       return;
     }
+
+    pararPolling();
     setBuscando(true);
+    setAtualizando(false);
     setResultados(null);
     setInfoCache(null);
     setAnalises({});
     setContatoAberto(null);
     gravarLocal(CHAVE_BUSCA, alvo);
+
     try {
       const payload = Object.fromEntries(
         Object.entries(alvo).filter(([, v]) => String(v).trim() !== '')
       );
       if (forcar) payload.forcar = '1';
       const res = await api.post('/buscar-anuncios', payload);
-      setResultados(res.data.anuncios || []);
-      setInfoCache({ do_cache: res.data.do_cache, buscado_em: res.data.buscado_em });
-      carregarUso();
-      carregarHistorico();
+
+      if (res.data.estado === 'pronto') {
+        setResultados(res.data.anuncios || []);
+        setInfoCache({ do_cache: res.data.do_cache, buscado_em: res.data.buscado_em });
+        setBuscando(false);
+        carregarUso();
+        carregarHistorico();
+        return;
+      }
+
+      // Busca começou. Mostra o resultado anterior na hora, se existir.
+      if (res.data.estimativa) setEstimativa(res.data.estimativa);
+      const anteriores = res.data.anuncios_anteriores || [];
+      if (anteriores.length > 0) {
+        setResultados(anteriores);
+        setInfoCache({ do_cache: true, buscado_em: res.data.anteriores_de });
+        setBuscando(false);
+      }
+      setAtualizando(true);
+      acompanharBusca(res.data.busca_id);
     } catch (error) {
-      tratarErro(error, 'Não foi possível concluir a busca agora');
+      if (ehTempoEsgotado(error)) {
+        aviso('O servidor demorou para responder. Tente de novo em instantes.', 'erro');
+      } else {
+        tratarErro(error, 'Não foi possível iniciar a busca agora');
+      }
       setResultados([]);
-    } finally {
       setBuscando(false);
+      setAtualizando(false);
     }
+  };
+
+  // Pergunta o andamento de 2 em 2 segundos até terminar.
+  const acompanharBusca = (buscaId) => {
+    if (!buscaId) return;
+    const comecou = Date.now();
+
+    pollRef.current = setInterval(async () => {
+      if (Date.now() - comecou > TIMEOUT_BUSCA) {
+        pararPolling();
+        setBuscando(false);
+        setAtualizando(false);
+        aviso('A busca passou de 4 minutos. Tente afrouxar algum filtro ou ampliar a faixa de preço.', 'erro');
+        return;
+      }
+
+      try {
+        const res = await api.get(`/buscar-anuncios/${buscaId}`);
+        setSegundos(res.data.segundos || 0);
+        if (res.data.estimativa) setEstimativa(res.data.estimativa);
+
+        if (res.data.estado === 'pronto') {
+          pararPolling();
+          setResultados(res.data.anuncios || []);
+          setInfoCache({ do_cache: false, buscado_em: res.data.buscado_em });
+          setBuscando(false);
+          setAtualizando(false);
+          carregarUso();
+          carregarHistorico();
+        } else if (res.data.estado === 'erro') {
+          pararPolling();
+          setBuscando(false);
+          setAtualizando(false);
+          aviso(res.data.erro || 'A busca não terminou desta vez.', 'erro');
+        }
+      } catch (error) {
+        pararPolling();
+        setBuscando(false);
+        setAtualizando(false);
+        tratarErro(error, 'Perdi o acompanhamento da busca');
+      }
+    }, 2000);
   };
 
   const analisarAnuncio = async (anuncio, id) => {
@@ -641,11 +776,11 @@ function App() {
 
   // Contador de tempo da busca. Espera de 40 segundos sem sinal nenhum parece travamento.
   useEffect(() => {
-    if (!buscando) return undefined;
+    if (!buscando && !atualizando) return undefined;
     setSegundos(0);
     const id = setInterval(() => setSegundos((s) => s + 1), 1000);
     return () => clearInterval(id);
-  }, [buscando]);
+  }, [buscando, atualizando]);
 
   const salvarNaCarteira = async (e) => {
     e.preventDefault();
@@ -1053,7 +1188,7 @@ function App() {
                         <div className="pendencia-info">
                           <span className="pendencia-titulo">{a.titulo}</span>
                           <span className="pendencia-meta">
-                            {formatarPreco(a.preco)}
+                            {formatarPrecoAnuncio(a)}
                             {a.site_origem ? ` · ${a.site_origem}` : ''}
                           </span>
                         </div>
@@ -1113,9 +1248,58 @@ function App() {
               <p className="ajuda">Só o bairro é obrigatório. Quanto mais campos preencher, mais precisa fica a busca.</p>
 
               <form onSubmit={(e) => { e.preventDefault(); executarBusca(false); }}>
+                <div className="seletor-negocio" role="radiogroup" aria-label="Finalidade">
+                  {[['venda', 'Comprar'], ['aluguel', 'Alugar']].map(([valor, rotulo]) => (
+                    <button
+                      type="button"
+                      key={valor}
+                      role="radio"
+                      aria-checked={(formBusca.negocio || 'venda') === valor}
+                      className={(formBusca.negocio || 'venda') === valor ? 'ativo' : ''}
+                      onClick={() => setFormBusca({ ...formBusca, negocio: valor })}
+                    >
+                      {rotulo}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="caixa-busca">
+                  <input
+                    className="campo-busca"
+                    type="text"
+                    autoComplete="off"
+                    placeholder={formBusca.negocio === 'aluguel'
+                      ? 'O que você procura para alugar?'
+                      : 'O que você procura?'}
+                    value={formBusca.consulta}
+                    onChange={(e) => setFormBusca({ ...formBusca, consulta: e.target.value })}
+                  />
+                  <button type="submit" className="btn btn-principal btn-buscar" disabled={buscando || atualizando}>
+                    {buscando || atualizando ? 'Buscando' : 'Buscar'}
+                  </button>
+                </div>
+
+                {!formBusca.consulta && !resultados ? (
+                  <div className="exemplos">
+                    <span className="exemplos-rotulo">Tente</span>
+                    {EXEMPLOS_BUSCA.map((ex) => (
+                      <button type="button" className="chip" key={ex}
+                        onClick={() => setFormBusca({ ...formBusca, consulta: ex })}>
+                        {ex}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+
+                <button type="button" className="btn btn-texto alternar-filtros"
+                  onClick={() => setMaisFiltros((v) => !v)}>
+                  {maisFiltros ? 'Esconder filtros' : 'Mais filtros'}
+                </button>
+
+                <div className={maisFiltros ? 'filtros-avancados' : 'filtros-avancados escondido'}>
                 <div className="grid grid-2">
                   <label>
-                    <span>Bairro <em>obrigatório</em></span>
+                    <span>Bairro</span>
                     <input type="text" placeholder="Ex: Águas Claras" value={formBusca.bairro}
                       onChange={(e) => setFormBusca({ ...formBusca, bairro: e.target.value })} />
                   </label>
@@ -1139,14 +1323,14 @@ function App() {
                     </select>
                   </label>
                   <label>
-                    <span>Preço mínimo</span>
-                    <input type="number" placeholder="R$" value={formBusca.preco_min}
-                      onChange={(e) => setFormBusca({ ...formBusca, preco_min: e.target.value })} />
+                    <span>{formBusca.negocio === 'aluguel' ? 'Aluguel mínimo (mês)' : 'Preço mínimo'}</span>
+                    <InputMoeda value={formBusca.preco_min}
+                      onChange={(v) => setFormBusca({ ...formBusca, preco_min: v })} />
                   </label>
                   <label>
-                    <span>Preço máximo</span>
-                    <input type="number" placeholder="R$" value={formBusca.preco_max}
-                      onChange={(e) => setFormBusca({ ...formBusca, preco_max: e.target.value })} />
+                    <span>{formBusca.negocio === 'aluguel' ? 'Aluguel máximo (mês)' : 'Preço máximo'}</span>
+                    <InputMoeda value={formBusca.preco_max}
+                      onChange={(v) => setFormBusca({ ...formBusca, preco_max: v })} />
                   </label>
                 </div>
 
@@ -1188,17 +1372,16 @@ function App() {
                     onChange={(e) => setFormBusca({ ...formBusca, detalhes: e.target.value })} />
                 </label>
 
+                </div>
+
                 <div className="acoes-form">
-                  <button type="submit" className="btn btn-principal" disabled={buscando}>
-                    {buscando ? 'Buscando nos portais...' : 'Buscar imóveis'}
-                  </button>
-                  <button type="button" className="btn btn-secundario" disabled={buscando}
+                  <button type="button" className="btn btn-secundario" disabled={buscando || atualizando}
                     onClick={agendarBuscaAtual}>
                     Agendar esta busca
                   </button>
-                  <button type="button" className="btn btn-texto" disabled={buscando}
+                  <button type="button" className="btn btn-texto" disabled={buscando || atualizando}
                     onClick={() => { setFormBusca(FORM_BUSCA_INICIAL); setResultados(null); setInfoCache(null); }}>
-                    Limpar campos
+                    Limpar
                   </button>
                 </div>
               </form>
@@ -1212,9 +1395,11 @@ function App() {
                   {historico.map((h) => (
                     <button key={h.id} className="chip" onClick={() => repetirBusca(h.criterios)}>
                       <span className="chip-texto">
-                        {h.criterios.bairro}
-                        {h.criterios.cidade ? `, ${h.criterios.cidade}` : ''}
-                        {h.criterios.tipo ? ` · ${h.criterios.tipo}` : ''}
+                        {h.criterios.consulta || [
+                          h.criterios.bairro,
+                          h.criterios.cidade,
+                          h.criterios.tipo,
+                        ].filter(Boolean).join(' · ')}
                       </span>
                       <span className="chip-meta">{h.resultados} · {quandoFoi(h.criado_em)}</span>
                     </button>
@@ -1226,24 +1411,41 @@ function App() {
             {buscando ? (
               <section className="painel estado">
                 <div className="spinner" />
-                <p>Consultando os portais de imóveis.</p>
+                <p>Procurando nos portais de imóveis.</p>
                 <p className="contador">{segundos}s</p>
+                <p className="previsao">{textoPrevisao(segundos, estimativa)}</p>
+                <div className="barra barra-espera">
+                  <div className="barra-fill"
+                    style={{ width: `${Math.min(97, (segundos / (estimativa || 45)) * 100)}%` }} />
+                </div>
                 <p className="ajuda-espera">
-                  Costuma levar de 20 a 60 segundos: a busca abre as páginas dos portais e
-                  lê os anúncios um a um. Repetir esta mesma busca hoje é instantâneo.
+                  Pode trocar de aba ou fechar esta tela: a busca continua rodando no servidor.
+                  Repetir a mesma busca hoje é instantâneo.
                 </p>
               </section>
             ) : null}
 
             {!buscando && resultados !== null ? (
               <section className="resultados">
+                {atualizando ? (
+                  <div className="faixa-atualizando">
+                    <div className="spinner spinner-pequeno" />
+                    <span>
+                      Mostrando o resultado anterior. Procurando imóveis novos agora,
+                      {' '}{segundos}s, {textoPrevisao(segundos, estimativa)}.
+                    </span>
+                  </div>
+                ) : null}
+
                 <div className="resultados-topo">
                   <h2>{resultados.length} {resultados.length === 1 ? 'imóvel encontrado' : 'imóveis encontrados'}</h2>
                   <div className="frescor">
                     {infoCache?.do_cache ? (
                       <>
                         <span className="capturado">Resultado salvo {quandoFoi(infoCache.buscado_em)}</span>
-                        <button className="btn btn-texto" onClick={() => executarBusca(true)}>Buscar de novo</button>
+                        {!atualizando ? (
+                          <button className="btn btn-texto" onClick={() => executarBusca(true)}>Buscar de novo</button>
+                        ) : null}
                       </>
                     ) : (
                       <span className="capturado">Capturado agora, confirme disponibilidade com o anunciante</span>
@@ -1350,7 +1552,7 @@ function App() {
                             </div>
                           </div>
 
-                          <p className="preco">{formatarPreco(registro.preco)}</p>
+                          <p className="preco">{formatarPrecoAnuncio({ ...anuncio, preco: registro.preco })}</p>
 
                           <ControleStatus
                             salvo={registro}
@@ -1699,7 +1901,7 @@ function App() {
                           {al.novos.slice(0, 5).map((a, i) => (
                             <div className="novo-item" key={a.link || i}>
                               <span className="novo-titulo">{a.titulo}</span>
-                              <span className="novo-preco">{formatarPreco(a.preco)}</span>
+                              <span className="novo-preco">{formatarPrecoAnuncio(a)}</span>
                             </div>
                           ))}
                         </div>
@@ -1758,8 +1960,8 @@ function App() {
                     </label>
                     <label>
                       <span>Preço <em>obrigatório</em></span>
-                      <input type="number" value={formCarteira.preco}
-                        onChange={(e) => setFormCarteira({ ...formCarteira, preco: e.target.value })} required />
+                      <InputMoeda value={formCarteira.preco}
+                        onChange={(v) => setFormCarteira({ ...formCarteira, preco: v })} />
                     </label>
                   </div>
 
@@ -1882,6 +2084,21 @@ function App() {
       <footer className="rodape">
         <p>Radar Imobiliário · dados capturados de portais públicos, sempre confirme disponibilidade com o anunciante</p>
       </footer>
+
+      {/* Fica visível em qualquer aba: a busca roda no servidor, não nesta tela. */}
+      {buscando || atualizando ? (
+        <button
+          className="indicador-busca"
+          onClick={() => setAba('buscar')}
+          title="Ver a busca em andamento"
+        >
+          <span className="spinner spinner-pequeno" />
+          <span className="indicador-texto">
+            <strong>Procurando imóveis</strong>
+            <span>{segundos}s · {textoPrevisao(segundos, estimativa)}</span>
+          </span>
+        </button>
+      ) : null}
     </div>
   );
 }
