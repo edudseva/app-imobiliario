@@ -551,10 +551,23 @@ function App() {
   const [formMembro, setFormMembro] = useState({ nome: '', email: '', senha: '' });
   const [salvandoMembro, setSalvandoMembro] = useState(false);
 
-  const aviso = (texto, tipo = 'info') => {
-    setMensagem({ texto, tipo });
-    if (tipo !== 'erro') setTimeout(() => setMensagem(null), 5000);
+  // Todo aviso some sozinho. Erro fica mais tempo porque tem mais o que ler,
+  // mas não pode virar sujeira grudada na tela nem seguir a pessoa de aba em aba.
+  const avisoRef = useRef(null);
+
+  const fecharAviso = () => {
+    if (avisoRef.current) clearTimeout(avisoRef.current);
+    avisoRef.current = null;
+    setMensagem(null);
   };
+
+  const aviso = (texto, tipo = 'info') => {
+    if (avisoRef.current) clearTimeout(avisoRef.current);
+    setMensagem({ texto, tipo });
+    avisoRef.current = setTimeout(() => setMensagem(null), tipo === 'erro' ? 9000 : 5000);
+  };
+
+  useEffect(() => () => { if (avisoRef.current) clearTimeout(avisoRef.current); }, []);
 
   const sair = useCallback(() => {
     try { localStorage.removeItem(CHAVE_SESSAO); } catch { /* segue */ }
@@ -939,8 +952,9 @@ function App() {
   }, [sessao, carregarSalvos, carregarHistorico, carregarAlertas, carregarResumo]);
 
   const agendarBuscaAtual = async () => {
-    if (!formBusca.bairro.trim()) {
-      aviso('Preencha ao menos o bairro antes de agendar', 'erro');
+    // Mesma regra da busca: a frase basta, o bairro é só a outra forma de dizer.
+    if (!String(formBusca.consulta || '').trim() && !String(formBusca.bairro || '').trim()) {
+      aviso('Escreva o que você procura antes de agendar. Exemplo: apartamento 2 quartos Águas Claras até 400 mil', 'erro');
       return;
     }
     const criterios = Object.fromEntries(
@@ -1102,7 +1116,12 @@ function App() {
         </div>
       ) : null}
 
-      {mensagem ? <div className={`alerta alerta-${mensagem.tipo}`}>{mensagem.texto}</div> : null}
+      {mensagem ? (
+        <div className={`alerta alerta-${mensagem.tipo}`} role="status">
+          <span>{mensagem.texto}</span>
+          <button className="alerta-fechar" onClick={fecharAviso} aria-label="Fechar aviso">×</button>
+        </div>
+      ) : null}
 
       <main className="conteudo">
         {aba === 'dia' ? (
