@@ -34,8 +34,35 @@
   --azul-info: #6f9fd8;
   --azul-fraco: rgba(111, 159, 216, 0.16);
 
-  --raio: 6px;
+  /* Escala de arredondamento: quanto maior a peça, mais macio o canto. */
+  --raio-p: 8px;
+  --raio: 12px;
+  --raio-g: 18px;
+  --pilula: 999px;
   --toque: 44px;
+
+  /* No escuro, profundidade vem de sombra embaixo e um fio de luz em cima. */
+  --sombra-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --sombra-2: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --sombra-3: 0 12px 32px rgba(0, 0, 0, 0.4);
+  --luz-topo: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --foco: 0 0 0 3px rgba(90, 169, 230, 0.22);
+
+  /* Uma curva só no app inteiro. Movimento que sai rápido e assenta devagar. */
+  --curva: cubic-bezier(0.4, 0, 0.2, 1);
+  --rapido: 0.15s var(--curva);
+  --medio: 0.25s var(--curva);
+}
+
+/* Acabamento não pode virar enjoo: quem pede menos movimento, recebe menos. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 * {
@@ -114,9 +141,10 @@ body {
   letter-spacing: 0.5px;
   text-transform: uppercase;
   color: var(--texto-fraco);
+  background: var(--superficie-2);
   border: 1px solid var(--linha);
-  padding: 5px 10px;
-  border-radius: 20px;
+  padding: 6px 12px;
+  border-radius: var(--pilula);
   white-space: nowrap;
 }
 
@@ -158,15 +186,29 @@ body {
   border-bottom-color: var(--acento);
 }
 
+.abas button:focus-visible {
+  outline: none;
+  color: var(--texto);
+  box-shadow: 0 2px 0 var(--acento);
+}
+
 /* ===== Avisos ===== */
 
 .alerta {
   max-width: 1100px;
   margin: 14px auto 0;
-  padding: 12px 16px;
+  padding: 13px 18px;
   border-radius: var(--raio);
   font-size: 14px;
+  line-height: 1.5;
   border-left: 3px solid transparent;
+  box-shadow: var(--sombra-1);
+  animation: surgir 0.25s var(--curva);
+}
+
+@keyframes surgir {
+  from { transform: translateY(-6px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
 }
 
 .alerta-sucesso {
@@ -201,10 +243,11 @@ body {
 }
 
 .painel {
-  background: var(--superficie);
+  background: linear-gradient(180deg, #262626 0%, var(--superficie) 42%);
   border: 1px solid var(--linha);
-  border-radius: var(--raio);
-  padding: 20px 16px;
+  border-radius: var(--raio-g);
+  padding: 22px 18px;
+  box-shadow: var(--sombra-1), var(--luz-topo);
 }
 
 .painel h2 {
@@ -264,16 +307,23 @@ select,
 textarea {
   width: 100%;
   min-height: var(--toque);
-  padding: 11px 12px;
+  padding: 12px 14px;
   border: 1px solid var(--linha);
   border-radius: var(--raio);
   font-size: 16px; /* 16px evita o zoom automático do iOS ao focar */
   font-family: inherit;
   color: var(--texto);
   background: var(--superficie-2);
-  transition: border-color 0.15s, background 0.15s;
+  box-shadow: var(--luz-topo);
+  transition: border-color var(--rapido), background var(--rapido), box-shadow var(--rapido);
   -webkit-appearance: none;
   appearance: none;
+}
+
+input:hover:not(:focus),
+select:hover:not(:focus),
+textarea:hover:not(:focus) {
+  border-color: var(--linha-forte);
 }
 
 select {
@@ -294,8 +344,9 @@ input:focus,
 select:focus,
 textarea:focus {
   outline: none;
-  border-color: var(--linha-forte);
-  background: var(--superficie-3);
+  border-color: var(--acento);
+  background: var(--superficie-2);
+  box-shadow: var(--foco);
 }
 
 textarea {
@@ -321,44 +372,61 @@ textarea {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   min-height: var(--toque);
-  padding: 12px 20px;
+  padding: 12px 22px;
   border: 1px solid transparent;
-  border-radius: var(--raio);
+  border-radius: var(--pilula);
   font-size: 12px;
   font-weight: 500;
-  letter-spacing: 1px;
+  letter-spacing: 0.9px;
   text-transform: uppercase;
   font-family: inherit;
   cursor: pointer;
   text-decoration: none;
   text-align: center;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  transition: background var(--rapido), border-color var(--rapido), color var(--rapido),
+    box-shadow var(--rapido), transform var(--rapido);
+}
+
+/* Afunda um fio ao apertar: dá a sensação de que o toque registrou. */
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--foco);
 }
 
 .btn:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .btn-principal {
-  background: var(--superficie-3);
+  background: linear-gradient(180deg, #454545 0%, var(--superficie-3) 100%);
   color: var(--texto);
   border-color: var(--linha-forte);
+  box-shadow: var(--sombra-1), var(--luz-topo);
 }
 
 .btn-principal:hover:not(:disabled) {
-  background: var(--acento);
+  background: linear-gradient(180deg, #6bb4ea 0%, var(--acento) 100%);
   border-color: var(--acento);
+  color: #0f2334;
+  box-shadow: 0 4px 14px rgba(90, 169, 230, 0.3);
 }
 
 .btn-zap {
-  background: var(--verde);
+  background: linear-gradient(180deg, #37b473 0%, var(--verde) 100%);
   color: #ffffff;
+  box-shadow: var(--sombra-1), var(--luz-topo);
 }
 
 .btn-zap:hover {
-  background: var(--verde-escuro);
+  background: linear-gradient(180deg, var(--verde) 0%, var(--verde-escuro) 100%);
+  box-shadow: 0 4px 14px rgba(46, 158, 99, 0.3);
 }
 
 .btn-secundario {
@@ -473,18 +541,21 @@ textarea {
 }
 
 .card {
-  background: var(--superficie);
+  background: linear-gradient(180deg, #272727 0%, var(--superficie) 46%);
   border: 1px solid var(--linha);
   border-left: 3px solid var(--linha-forte);
-  border-radius: var(--raio);
-  padding: 16px;
+  border-radius: var(--raio-g);
+  padding: 18px;
   display: flex;
   flex-direction: column;
-  transition: border-color 0.15s;
+  box-shadow: var(--sombra-1), var(--luz-topo);
+  transition: border-color var(--medio), box-shadow var(--medio), transform var(--medio);
 }
 
 .card:hover {
   border-color: var(--linha-forte);
+  box-shadow: var(--sombra-2), var(--luz-topo);
+  transform: translateY(-2px);
 }
 
 .card-cabecalho {
@@ -518,16 +589,17 @@ textarea {
   color: var(--texto-fraco);
   background: var(--superficie-2);
   border: 1px solid var(--linha);
-  padding: 4px 8px;
-  border-radius: 20px;
+  padding: 5px 10px;
+  border-radius: var(--pilula);
 }
 
 .preco {
-  font-size: 24px;
+  font-size: 25px;
   font-weight: 300;
-  letter-spacing: -0.3px;
+  letter-spacing: -0.4px;
   color: var(--texto);
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+  font-variant-numeric: tabular-nums;
 }
 
 .specs {
@@ -542,8 +614,9 @@ textarea {
   font-size: 12px;
   color: var(--texto-suave);
   background: var(--superficie-2);
-  padding: 5px 10px;
-  border-radius: var(--raio);
+  border: 1px solid var(--linha);
+  padding: 5px 11px;
+  border-radius: var(--pilula);
 }
 
 .descricao {
@@ -557,7 +630,8 @@ textarea {
   font-size: 13px;
   color: var(--texto-suave);
   background: var(--superficie-2);
-  padding: 10px 12px;
+  border: 1px solid var(--linha);
+  padding: 11px 14px;
   border-radius: var(--raio);
   margin-bottom: 12px;
 }
@@ -568,8 +642,8 @@ textarea {
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.4px;
-  padding: 5px 10px;
-  border-radius: var(--raio);
+  padding: 6px 12px;
+  border-radius: var(--pilula);
   margin-bottom: 14px;
 }
 
@@ -604,8 +678,9 @@ textarea {
 
 .analise {
   background: var(--superficie-2);
+  border: 1px solid var(--linha);
   border-radius: var(--raio);
-  padding: 14px;
+  padding: 15px;
   margin-bottom: 14px;
 }
 
@@ -621,8 +696,8 @@ textarea {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.6px;
-  padding: 4px 9px;
-  border-radius: 3px;
+  padding: 5px 11px;
+  border-radius: var(--pilula);
 }
 
 .tag-caro { background: var(--vermelho-fraco); color: #f3a9a7; }
@@ -636,17 +711,18 @@ textarea {
 }
 
 .barra {
-  height: 4px;
-  background: #3d3d3d;
-  border-radius: 2px;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: var(--pilula);
   overflow: hidden;
   margin-bottom: 10px;
 }
 
 .barra-fill {
   height: 100%;
-  background: var(--acento);
-  transition: width 0.5s ease-out;
+  border-radius: var(--pilula);
+  background: linear-gradient(90deg, var(--acento-escuro), var(--acento));
+  transition: width 0.6s var(--curva);
 }
 
 .analise-resumo {
@@ -673,8 +749,9 @@ textarea {
 
 .contato-assistido {
   background: var(--superficie-2);
+  border: 1px solid var(--linha);
   border-radius: var(--raio);
-  padding: 14px;
+  padding: 15px;
   margin-bottom: 14px;
 }
 
@@ -693,8 +770,8 @@ textarea {
   justify-content: space-between;
   gap: 10px;
   background: var(--superficie);
-  border-radius: var(--raio);
-  padding: 8px 10px;
+  border-radius: var(--raio-p);
+  padding: 9px 12px;
   margin-bottom: 6px;
 }
 
@@ -849,22 +926,18 @@ textarea {
 
 .campo-busca {
   flex: 1;
-  min-height: 52px;
+  min-height: 54px;
   font-size: 16px;
-  padding: 14px 16px;
+  padding: 15px 20px;
+  border-radius: var(--pilula);
   background: var(--superficie-2);
   border-color: var(--linha-forte);
 }
 
-.campo-busca:focus {
-  border-color: var(--acento);
-  background: var(--superficie-2);
-}
-
 .btn-buscar {
   flex-shrink: 0;
-  min-height: 52px;
-  padding: 0 28px;
+  min-height: 54px;
+  padding: 0 30px;
 }
 
 .exemplos {
@@ -899,13 +972,20 @@ textarea {
 }
 
 .filtros-avancados {
-  padding-top: 8px;
+  padding-top: 14px;
+  margin-top: 4px;
   border-top: 1px solid var(--linha);
   margin-bottom: 8px;
+  animation: abrir 0.25s var(--curva);
 }
 
 .filtros-avancados.escondido {
   display: none;
+}
+
+@keyframes abrir {
+  from { transform: translateY(-6px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
 }
 
 .faixa-atualizando {
@@ -913,11 +993,14 @@ textarea {
   align-items: center;
   gap: 10px;
   background: var(--acento-fraco);
-  border-radius: var(--raio);
-  padding: 10px 14px;
-  margin-bottom: 12px;
+  border: 1px solid rgba(90, 169, 230, 0.25);
+  border-radius: var(--pilula);
+  padding: 11px 18px;
+  margin-bottom: 14px;
   font-size: 13px;
+  line-height: 1.45;
   color: var(--texto-suave);
+  animation: surgir 0.25s var(--curva);
 }
 
 .spinner-pequeno {
@@ -1016,17 +1099,18 @@ textarea {
   display: inline-flex;
   background: var(--superficie-2);
   border: 1px solid var(--linha);
-  border-radius: var(--raio);
-  padding: 3px;
+  border-radius: var(--pilula);
+  padding: 4px;
   margin-bottom: 18px;
+  box-shadow: var(--luz-topo);
 }
 
 .seletor-negocio button {
-  min-height: calc(var(--toque) - 6px);
-  padding: 0 22px;
+  min-height: calc(var(--toque) - 8px);
+  padding: 0 24px;
   background: none;
   border: none;
-  border-radius: calc(var(--raio) - 2px);
+  border-radius: var(--pilula);
   color: var(--texto-fraco);
   font-family: inherit;
   font-size: 13px;
@@ -1034,7 +1118,7 @@ textarea {
   letter-spacing: 0.6px;
   text-transform: uppercase;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--medio), color var(--medio), box-shadow var(--medio);
 }
 
 .seletor-negocio button:hover {
@@ -1042,8 +1126,9 @@ textarea {
 }
 
 .seletor-negocio button.ativo {
-  background: var(--acento);
-  color: #ffffff;
+  background: linear-gradient(180deg, #6bb4ea 0%, var(--acento) 100%);
+  color: #0f2334;
+  box-shadow: 0 2px 10px rgba(90, 169, 230, 0.32);
 }
 
 @media (max-width: 720px) {
