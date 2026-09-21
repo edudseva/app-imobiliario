@@ -168,6 +168,16 @@ const FORM_BUSCA_INICIAL = {
   quartos_min: '', banheiros_min: '', vagas_min: '', area_min: '', area_max: '', detalhes: '',
 };
 
+// Campos que vivem atrás de "Mais filtros". Usado para avisar quantos estão
+// valendo, já que escondido e ativo ao mesmo tempo engana.
+const CAMPOS_AVANCADOS = [
+  'cidade', 'bairro', 'tipo', 'preco_min', 'preco_max',
+  'quartos_min', 'banheiros_min', 'vagas_min', 'area_min', 'area_max', 'detalhes',
+];
+
+const contarFiltros = (form) =>
+  CAMPOS_AVANCADOS.filter((campo) => String(form[campo] || '').trim() !== '').length;
+
 const EXEMPLOS_BUSCA = [
   'apartamento 2 quartos Águas Claras até 400 mil',
   'casa com 3 vagas no Lago Sul',
@@ -502,7 +512,18 @@ function App() {
   const [resumo, setResumo] = useState(null);
   const [mensagem, setMensagem] = useState(null);
 
-  const [formBusca, setFormBusca] = useState(() => lerLocal(CHAVE_BUSCA, FORM_BUSCA_INICIAL));
+  // Só a frase e a finalidade voltam do armazenamento. Restaurar filtro fino
+  // era armadilha: ficava escondido atrás de "Mais filtros" restringindo a
+  // busca sem a pessoa ver.
+  const [formBusca, setFormBusca] = useState(() => {
+    const salvo = lerLocal(CHAVE_BUSCA, {});
+    return {
+      ...FORM_BUSCA_INICIAL,
+      consulta: salvo.consulta || '',
+      negocio: salvo.negocio === 'aluguel' ? 'aluguel' : 'venda',
+    };
+  });
+  const [horaAgendar, setHoraAgendar] = useState(7);
   const [buscando, setBuscando] = useState(false);
   const [atualizando, setAtualizando] = useState(false);
   const [maisFiltros, setMaisFiltros] = useState(false);
@@ -624,7 +645,7 @@ function App() {
     setInfoCache(null);
     setAnalises({});
     setContatoAberto(null);
-    gravarLocal(CHAVE_BUSCA, alvo);
+    gravarLocal(CHAVE_BUSCA, { consulta: alvo.consulta || '', negocio: alvo.negocio || 'venda' });
 
     try {
       const payload = Object.fromEntries(
@@ -961,8 +982,8 @@ function App() {
       Object.entries(formBusca).filter(([, v]) => String(v).trim() !== '')
     );
     try {
-      await api.post('/alertas', { criterios, hora: 7 });
-      aviso('Busca agendada. Roda todo dia às 07:00 enquanto estiver ativa.', 'sucesso');
+      await api.post('/alertas', { criterios, hora: horaAgendar });
+      aviso(`Busca agendada. Roda todo dia às ${String(horaAgendar).padStart(2, '0')}:00 enquanto estiver ativa.`, 'sucesso');
       await carregarAlertas();
       setAba('alertas');
     } catch (error) {
@@ -1040,6 +1061,8 @@ function App() {
     const alvo = { ...FORM_BUSCA_INICIAL, ...criterios };
     setFormBusca(alvo);
     setAba('buscar');
+    // Se a busca antiga tinha filtro fino, abre o painel: nada valendo escondido.
+    if (contarFiltros(alvo) > 0) setMaisFiltros(true);
     executarBusca(false, alvo);
   };
 
@@ -1316,6 +1339,9 @@ function App() {
                 <button type="button" className="btn btn-texto alternar-filtros"
                   onClick={() => setMaisFiltros((v) => !v)}>
                   {maisFiltros ? 'Esconder filtros' : 'Mais filtros'}
+                  {!maisFiltros && contarFiltros(formBusca) > 0 ? (
+                    <span className="contagem-filtros">{contarFiltros(formBusca)}</span>
+                  ) : null}
                 </button>
 
                 <div className={maisFiltros ? 'filtros-avancados' : 'filtros-avancados escondido'}>
@@ -1397,12 +1423,22 @@ function App() {
                 </div>
 
                 <div className="acoes-form">
-                  <button type="button" className="btn btn-secundario" disabled={buscando || atualizando}
-                    onClick={agendarBuscaAtual}>
-                    Agendar esta busca
-                  </button>
+                  <div className="agendar-grupo">
+                    <button type="button" className="btn btn-secundario" disabled={buscando || atualizando}
+                      onClick={agendarBuscaAtual}>
+                      Agendar esta busca
+                    </button>
+                    <label className="agendar-hora">
+                      <span>todo dia às</span>
+                      <select value={horaAgendar} onChange={(e) => setHoraAgendar(Number(e.target.value))}>
+                        {Array.from({ length: 24 }, (_, h) => (
+                          <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
                   <button type="button" className="btn btn-texto" disabled={buscando || atualizando}
-                    onClick={() => { setFormBusca(FORM_BUSCA_INICIAL); setResultados(null); setInfoCache(null); }}>
+                    onClick={() => { setFormBusca(FORM_BUSCA_INICIAL); setResultados(null); setInfoCache(null); setMaisFiltros(false); }}>
                     Limpar
                   </button>
                 </div>
@@ -1795,13 +1831,19 @@ function App() {
             ) : null}
 
             <form onSubmit={salvarNotificacoes}>
-              <label className="interruptor" style={{ marginBottom: 16 }}>
+              <label
+                className={`interruptor ${notificacoes.notificar_email ? 'ligado' : ''}`}
+                style={{ marginBottom: 16 }}
+              >
                 <input
                   type="checkbox"
                   checked={notificacoes.notificar_email}
                   onChange={(e) => setNotificacoes({ ...notificacoes, notificar_email: e.target.checked })}
                 />
-                <span>{notificacoes.notificar_email ? 'Avisar por email' : 'Não avisar'}</span>
+                <span className="trilho"><span className="pino" /></span>
+                <span className="interruptor-texto">
+                  {notificacoes.notificar_email ? 'Avisar por email' : 'Não avisar'}
+                </span>
               </label>
 
               <label className="campo-largo">
@@ -1887,13 +1929,14 @@ function App() {
                           <h3>{al.nome}</h3>
                           <p className="alerta-criterios">{resumoCriterios(al.criterios)}</p>
                         </div>
-                        <label className="interruptor">
+                        <label className={`interruptor ${al.ativo ? 'ligado' : ''}`}>
                           <input
                             type="checkbox"
                             checked={al.ativo}
                             onChange={(e) => alterarAlerta(al.id, { ativo: e.target.checked })}
                           />
-                          <span>{al.ativo ? 'Ativo' : 'Pausado'}</span>
+                          <span className="trilho"><span className="pino" /></span>
+                          <span className="interruptor-texto">{al.ativo ? 'Ativo' : 'Pausado'}</span>
                         </label>
                       </div>
 
