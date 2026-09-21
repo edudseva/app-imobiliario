@@ -1051,6 +1051,12 @@ textarea {
   border-color: var(--acento);
 }
 
+.indicador-busca:active {
+  transform: scale(0.97);
+  border-color: var(--acento);
+  background: var(--superficie-3);
+}
+
 .indicador-texto {
   display: flex;
   flex-direction: column;
@@ -1092,6 +1098,121 @@ textarea {
   .btn-buscar {
     width: 100%;
   }
+}
+
+/* ===== Toque =====
+   No celular, :hover gruda depois do tap e só sai quando a pessoa toca em
+   outro lugar, o que parece defeito. Aqui o hover decorativo é desligado em
+   tela de toque e a resposta passa para :active, que é o instante do dedo. */
+
+button,
+a,
+input,
+select,
+textarea,
+.chip,
+.card,
+.tile,
+.estrela {
+  /* Troca o flash azul do sistema por um retorno nosso, desenhado. */
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+a,
+label,
+select,
+.chip {
+  touch-action: manipulation;
+}
+
+@media (hover: none) {
+  .card:hover,
+  .tile:hover,
+  .plano-card:hover,
+  .chip:hover {
+    transform: none;
+    box-shadow: var(--sombra-1), var(--luz-topo);
+  }
+
+  .chip:hover {
+    border-color: var(--linha);
+    color: var(--texto-suave);
+  }
+
+  .btn-principal:hover:not(:disabled) {
+    background: linear-gradient(180deg, #454545 0%, var(--superficie-3) 100%);
+    border-color: var(--linha-forte);
+    color: var(--texto);
+    box-shadow: var(--sombra-1), var(--luz-topo);
+  }
+
+  .btn-zap:hover {
+    background: linear-gradient(180deg, #37b473 0%, var(--verde) 100%);
+    box-shadow: var(--sombra-1), var(--luz-topo);
+  }
+
+  .btn-copiar:hover {
+    background: var(--superficie-3);
+    border-color: var(--linha-forte);
+  }
+
+  .estrela:hover {
+    transform: none;
+    color: var(--texto-fraco);
+  }
+
+  .estrela-ativa:hover {
+    color: var(--ambar);
+  }
+}
+
+/* A cor muda no instante do toque, não depois de soltar. */
+.btn-principal:active:not(:disabled) {
+  background: linear-gradient(180deg, var(--acento) 0%, var(--acento-escuro) 100%);
+  border-color: var(--acento-escuro);
+  color: #0f2334;
+  box-shadow: none;
+}
+
+.btn-zap:active {
+  background: linear-gradient(180deg, var(--verde) 0%, var(--verde-escuro) 100%);
+  box-shadow: none;
+}
+
+.btn-secundario:active:not(:disabled) {
+  background: var(--superficie-2);
+  border-color: var(--acento);
+  color: var(--texto);
+}
+
+.btn-texto:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--texto);
+}
+
+.btn-perigo:active:not(:disabled) {
+  background: var(--vermelho-fraco);
+  color: var(--vermelho);
+}
+
+.btn-copiar:active {
+  background: linear-gradient(180deg, var(--acento) 0%, var(--acento-escuro) 100%);
+  border-color: var(--acento-escuro);
+  color: #0f2334;
+}
+
+.abas button:active {
+  color: var(--texto);
+}
+
+.seletor-negocio button:active:not(.ativo) {
+  background: rgba(90, 169, 230, 0.16);
+  color: var(--texto);
+}
+
+.seletor-negocio button.ativo:active {
+  background: linear-gradient(180deg, var(--acento) 0%, var(--acento-escuro) 100%);
 }
 
 /* Seletor Comprar / Alugar no topo da busca */
