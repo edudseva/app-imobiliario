@@ -64,6 +64,12 @@
   color: var(--ambar);
 }
 
+/* Favoritar é a ação mais repetida no celular: precisa responder na hora. */
+.estrela:active {
+  transform: scale(0.86);
+  color: var(--ambar);
+}
+
 .estrela-ativa {
   color: var(--ambar);
 }
@@ -143,8 +149,17 @@
   box-shadow: var(--sombra-1), var(--luz-topo);
 }
 
+/* Aperta e encolhe um fio: o dedo sente que registrou. */
 .chip:active {
-  transform: translateY(0);
+  transform: scale(0.97);
+  background: var(--superficie-3);
+  border-color: var(--acento);
+  color: var(--texto);
+}
+
+.chip-ativo:active {
+  background: linear-gradient(180deg, var(--acento) 0%, var(--acento-escuro) 100%);
+  color: #0f2334;
 }
 
 .chip:focus-visible {
