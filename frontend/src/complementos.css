@@ -41,7 +41,34 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 55%;
+}
+
+/* Nome de imobiliária é texto de terceiro: pode vir enorme. No celular ele
+   empurrava o cartão para fora da tela. Deixa encolher e cortar com "...". */
+.card-cabecalho > div:first-child {
+  min-width: 0;
+}
+
+.card-cabecalho h3 {
+  overflow-wrap: anywhere;
+}
+
+.portal {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .card-canto {
+    max-width: 48%;
+  }
 }
 
 .estrela {
