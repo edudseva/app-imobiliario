@@ -57,7 +57,16 @@ app.get('/health/db', async (req, res) => {
   }
 });
 
-const client = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+// Sem timeout, uma chamada travada segura a requisição para sempre e o app
+// fica girando o spinner sem nunca falhar. Melhor errar rápido e avisar.
+const TIMEOUT_IA = inteiroEntre(process.env.TIMEOUT_IA_MS, 120000, 20000, 300000);
+const PRAZO_BUSCA = inteiroEntre(process.env.PRAZO_BUSCA_MS, 200000, 30000, 600000);
+
+const client = new Anthropic({
+  apiKey: process.env.CLAUDE_API_KEY,
+  timeout: TIMEOUT_IA,
+  maxRetries: 1,
+});
 
 // ============ CONFIGURAÇÃO ============
 
@@ -340,6 +349,25 @@ async function prepararBanco() {
     `);
 
     // Cota é por conta principal e por mês. A competência é sempre o dia 1.
+    // Busca roda em segundo plano. A requisição devolve um id na hora e o
+    // app pergunta o andamento. Sem isso, o navegador segura uma conexão
+    // por minutos e o usuário olha para uma tela branca.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS buscas_job (
+        id CHAR(32) PRIMARY KEY,
+        conta_id INT NOT NULL,
+        usuario_id INT NOT NULL,
+        chave CHAR(64) NOT NULL,
+        criterios TEXT,
+        estado VARCHAR(12) NOT NULL DEFAULT 'rodando',
+        resultado LONGTEXT,
+        erro VARCHAR(300) NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        terminado_em TIMESTAMP NULL,
+        INDEX idx_job_usuario (usuario_id, criado_em)
+      )
+    `);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS uso_mensal (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -600,6 +628,18 @@ async function consumirCota(contaId, campo, teto) {
     [contaId]
   );
   return true;
+}
+
+// Busca que falhou não pode custar cota do cliente.
+async function devolverCota(contaId, campo) {
+  try {
+    await pool.query(
+      `UPDATE uso_mensal SET ${campo} = GREATEST(${campo} - 1, 0) WHERE conta_id = ? AND competencia = ${COMPETENCIA}`,
+      [contaId]
+    );
+  } catch (error) {
+    console.error('Falha ao devolver cota:', error.message);
+  }
 }
 
 // Resolve a conta pagante de um usuário. Usado fora das rotas (agendador).
@@ -927,12 +967,58 @@ function somenteCriterios(entrada) {
     const v = entrada[campo];
     if (v !== undefined && v !== null && String(v).trim() !== '') saida[campo] = v;
   });
+  // Venda é o padrão e não entra nos critérios, para não invalidar cache e alertas antigos.
+  if (normalizar(entrada.negocio) === 'aluguel') saida.negocio = 'aluguel';
+  // Busca por frase: o texto é o critério principal.
+  if (entrada.consulta && String(entrada.consulta).trim()) {
+    saida.consulta = String(entrada.consulta).trim().slice(0, 300);
+  }
   return saida;
 }
 
 function chaveDaBusca(criterios) {
-  const base = CAMPOS_BUSCA.map((campo) => `${campo}=${normalizar(criterios[campo])}`).join('|');
+  let base = CAMPOS_BUSCA.map((campo) => `${campo}=${normalizar(criterios[campo])}`).join('|');
+  if (criterios.negocio === 'aluguel') base += '|negocio=aluguel';
+  if (criterios.consulta) base += `|consulta=${normalizar(criterios.consulta)}`;
   return crypto.createHash('sha256').update(base).digest('hex');
+}
+
+// Tira do texto o que dá para ler com segurança: preço, quartos, vagas, área.
+// O resto da frase vai inteiro para a IA, que entende bairro e contexto melhor
+// do que qualquer expressão regular minha.
+function interpretarConsulta(texto) {
+  const t = normalizar(texto);
+  const achados = {};
+  if (!t) return achados;
+
+  const paraNumero = (n, unidade) => {
+    let v = parseFloat(String(n).replace(/\./g, '').replace(',', '.'));
+    if (!Number.isFinite(v)) return null;
+    if (/mil/.test(unidade || '')) v *= 1000;
+    if (/milh/.test(unidade || '')) v *= 1000000;
+    return Math.round(v);
+  };
+
+  const ate = t.match(/(?:ate|abaixo de|no maximo|max(?:imo)?)\s*(?:r\$\s*)?([\d.,]+)\s*(mil|milhao|milhoes|milh[ãa]o)?/);
+  if (ate) { const v = paraNumero(ate[1], ate[2]); if (v) achados.preco_max = v; }
+
+  const apartir = t.match(/(?:a partir de|acima de|no minimo|min(?:imo)?|de)\s*(?:r\$\s*)?([\d.,]+)\s*(mil|milhao|milhoes|milh[ãa]o)?/);
+  if (apartir) { const v = paraNumero(apartir[1], apartir[2]); if (v) achados.preco_min = v; }
+
+  const quartos = t.match(/(\d+)\s*(?:quarto|dormitorio|qto)/);
+  if (quartos) achados.quartos_min = Number(quartos[1]);
+
+  const vagas = t.match(/(\d+)\s*(?:vaga|garagem)/);
+  if (vagas) achados.vagas_min = Number(vagas[1]);
+
+  const area = t.match(/(\d+)\s*(?:m2|m²|metros)/);
+  if (area) achados.area_min = Number(area[1]);
+
+  const tipos = ['apartamento', 'casa', 'terreno', 'comercial', 'sala comercial', 'kitnet', 'studio', 'cobertura'];
+  const tipo = tipos.find((x) => t.includes(x));
+  if (tipo) achados.tipo = tipo;
+
+  return achados;
 }
 
 // Identidade do anúncio. O link é o melhor identificador; sem ele, título + portal.
@@ -998,12 +1084,19 @@ async function registrarHistorico(usuarioId, criterios, resultados) {
 
 async function consultarPortais(criterios) {
   const { cidade, bairro, tipo, preco_min, preco_max, quartos_min, banheiros_min, vagas_min, area_min, area_max, detalhes } = criterios;
+  const aluguel = criterios.negocio === 'aluguel';
+  const finalidade = aluguel ? 'para alugar' : 'à venda';
+  const unidadePreco = aluguel ? ' por mês' : '';
 
   const linhasCriterios = [
-    `Localização: ${bairro}${cidade ? `, ${cidade}` : ''}`,
+    `Finalidade: ${aluguel ? 'ALUGUEL' : 'VENDA'}`,
+    criterios.consulta && `Pedido do corretor, em português, palavra por palavra: "${criterios.consulta}"`,
+    criterios.consulta && 'Interprete o pedido acima para descobrir bairro, cidade e o que mais estiver escrito. Ele tem prioridade sobre os campos abaixo quando houver conflito.',
+    bairro && `Localização: ${bairro}${cidade ? `, ${cidade}` : ''}`,
+    !bairro && cidade && `Cidade: ${cidade}`,
     tipo && `Tipo: ${tipo}`,
-    preco_min && `Preço mínimo: R$ ${preco_min}`,
-    preco_max && `Preço máximo: R$ ${preco_max}`,
+    preco_min && `${aluguel ? 'Aluguel' : 'Preço'} mínimo: R$ ${preco_min}${unidadePreco}`,
+    preco_max && `${aluguel ? 'Aluguel' : 'Preço'} máximo: R$ ${preco_max}${unidadePreco}`,
     quartos_min && `Mínimo de ${quartos_min} quarto(s)`,
     banheiros_min && `Mínimo de ${banheiros_min} banheiro(s)`,
     vagas_min && `Mínimo de ${vagas_min} vaga(s) de garagem`,
@@ -1014,9 +1107,9 @@ async function consultarPortais(criterios) {
 
   const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
 
-  const prompt = `Você é um assistente especializado em buscar imóveis à venda no Brasil. Hoje é ${hoje}.
+  const prompt = `Você é um assistente especializado em buscar imóveis ${finalidade} no Brasil. Hoje é ${hoje}.
 
-Encontre anúncios REAIS e ATIVOS de imóveis à venda em portais como OLX, Viva Real, Zap Imóveis, Imovelweb, DF Imóveis, MGF Imóveis e QuintoAndar, que combinem com estes critérios:
+Encontre anúncios REAIS e ATIVOS de imóveis ${finalidade} em portais como OLX, Viva Real, Zap Imóveis, Imovelweb, DF Imóveis, MGF Imóveis e QuintoAndar, que combinem com estes critérios:
 
 ${linhasCriterios}
 
@@ -1038,6 +1131,10 @@ Demais regras:
 - Marque "aceita_parceria" como true apenas se o anúncio disser explicitamente que aceita parceria ou comissão com corretores. Marque false apenas se disser explicitamente que não aceita. Caso contrário, null.
 - Ordene do mais barato para o mais caro.
 - Se não encontrar nenhum anúncio real correspondente, retorne a lista vazia. Nunca invente anúncios.
+${aluguel
+  ? '- A busca é de ALUGUEL. Ignore anúncios de venda. O campo "preco" é o valor mensal do aluguel, sem condomínio e IPTU.'
+  : '- A busca é de VENDA. Ignore anúncios de aluguel ou temporada.'}
+- Seja eficiente. Se depois de algumas pesquisas não houver mais anúncios que se encaixem, pare de procurar e responda com o que encontrou, mesmo que seja pouco. Não fique procurando indefinidamente.
 
 Traga o maior número possível de anúncios reais que atendam aos critérios, até 20. Não pare em poucos resultados se houver mais disponíveis nos portais. Nunca descarte um anúncio apenas porque não conseguiu confirmar as preferências adicionais no texto do anúncio.
 
@@ -1046,7 +1143,7 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
   "anuncios": [
     {
       "titulo": "título do anúncio",
-      "preco": número (só o valor, sem R$),
+      "preco": número (só o valor, sem R$${aluguel ? ', valor mensal' : ''}),
       "bairro": "bairro",
       "cidade": "cidade",
       "tipo": "apartamento/casa/terreno/comercial",
@@ -1062,20 +1159,50 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
   ]
 }`;
 
-  const message = await client.messages.create({
+  const ferramentas = [
+    { type: 'web_search_20250305', name: 'web_search', max_uses: 6 },
+    {
+      type: 'web_fetch_20250910',
+      name: 'web_fetch',
+      max_uses: 10,
+      max_content_tokens: 6000,
+    },
+  ];
+
+  // A API roda as ferramentas num loop interno com limite de iterações.
+  // Busca difícil (poucos anúncios que batem) estoura esse limite e volta
+  // com stop_reason "pause_turn": o trabalho não acabou, precisa continuar.
+  const MAX_CONTINUACOES = 2;
+  const comecou = Date.now();
+  const passouDoPrazo = () => Date.now() - comecou > PRAZO_BUSCA;
+
+  let message = await client.messages.create({
     model: 'claude-sonnet-5',
     max_tokens: 16000,
-    tools: [
-      { type: 'web_search_20250305', name: 'web_search', max_uses: 6 },
-      {
-        type: 'web_fetch_20250910',
-        name: 'web_fetch',
-        max_uses: 10,
-        max_content_tokens: 6000,
-      },
-    ],
+    tools: ferramentas,
     messages: [{ role: 'user', content: prompt }],
   });
+
+  let continuacoes = 0;
+  while (message.stop_reason === 'pause_turn' && continuacoes < MAX_CONTINUACOES && !passouDoPrazo()) {
+    continuacoes += 1;
+    console.log(`Busca ${bairro}: pause_turn, continuando (${continuacoes}/${MAX_CONTINUACOES})`);
+    message = await client.messages.create({
+      model: 'claude-sonnet-5',
+      max_tokens: 16000,
+      tools: ferramentas,
+      messages: [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: message.content },
+      ],
+    });
+  }
+
+  const segundos = Math.round((Date.now() - comecou) / 1000);
+  console.log(`Busca ${bairro}: stop_reason=${message.stop_reason}, continuacoes=${continuacoes}, ${segundos}s`);
+  if (message.stop_reason === 'pause_turn') {
+    throw new Error(`A busca não terminou no prazo (${segundos}s)`);
+  }
 
   const textoCompleto = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
 
@@ -1092,6 +1219,7 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
 
   return (resposta.anuncios || []).map((a) => ({
     ...a,
+    negocio: aluguel ? 'aluguel' : 'venda',
     link_direto: ehLinkDeAnuncio(a.link),
     link: ehLinkDeAnuncio(a.link) ? a.link : null,
   }));
@@ -1478,11 +1606,115 @@ app.post('/api/analisar-avulso', autenticar, exigirAssinatura, async (req, res) 
 
 // ============ BUSCA ============
 
+// Resultado salvo mesmo vencido. Serve para a tela nunca ficar em branco:
+// mostra o de ontem enquanto a busca nova roda.
+async function lerCacheVencido(chave) {
+  try {
+    const [rows] = await pool.query(
+      'SELECT resultado, criado_em FROM buscas_cache WHERE chave = ? ORDER BY criado_em DESC LIMIT 1',
+      [chave]
+    );
+    if (rows.length === 0) return null;
+    return { anuncios: JSON.parse(rows[0].resultado), buscado_em: rows[0].criado_em };
+  } catch {
+    return null;
+  }
+}
+
+// Previsão honesta: média das buscas que realmente terminaram por aqui.
+// Sem histórico ainda, usa 45s, que é o meio da faixa observada.
+let estimativaCache = { valor: 45, expira: 0 };
+
+async function estimativaDeBusca() {
+  if (Date.now() < estimativaCache.expira) return estimativaCache.valor;
+  try {
+    const [rows] = await pool.query(
+      `SELECT AVG(segundos) AS media FROM (
+         SELECT TIMESTAMPDIFF(SECOND, criado_em, terminado_em) AS segundos
+         FROM buscas_job
+         WHERE estado = 'pronto' AND terminado_em IS NOT NULL
+         ORDER BY terminado_em DESC LIMIT 20
+       ) recentes`
+    );
+    const media = Number(rows[0] && rows[0].media);
+    const valor = Number.isFinite(media) && media > 0 ? Math.round(media) : 45;
+    estimativaCache = { valor: Math.min(Math.max(valor, 15), 180), expira: Date.now() + 5 * 60 * 1000 };
+  } catch {
+    estimativaCache = { valor: 45, expira: Date.now() + 60 * 1000 };
+  }
+  return estimativaCache.valor;
+}
+
+// Roda a busca fora da requisição e guarda o resultado no job.
+async function rodarJob(jobId, criterios, contaId, usuarioId) {
+  const chave = chaveDaBusca(criterios);
+  try {
+    const anuncios = await consultarPortais(criterios);
+    if (anuncios.length > 0) await gravarNoCache(chave, criterios, anuncios);
+    await registrarHistorico(usuarioId, criterios, anuncios.length);
+    await pool.query(
+      "UPDATE buscas_job SET estado = 'pronto', resultado = ?, terminado_em = NOW() WHERE id = ?",
+      [JSON.stringify(anuncios), jobId]
+    );
+    console.log(`Job ${jobId.slice(0, 8)}: pronto, ${anuncios.length} anuncios`);
+  } catch (erroBusca) {
+    await devolverCota(contaId, 'buscas');
+    console.error(`Job ${jobId.slice(0, 8)} falhou:`, erroBusca.message);
+    await pool.query(
+      "UPDATE buscas_job SET estado = 'erro', erro = ?, terminado_em = NOW() WHERE id = ?",
+      [String(erroBusca.message || 'falhou').slice(0, 300), jobId]
+    );
+  }
+}
+
+// Consulta o andamento de uma busca. O app pergunta de 2 em 2 segundos.
+app.get('/api/buscar-anuncios/:id', autenticar, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT * FROM buscas_job WHERE id = ? AND usuario_id = ?',
+      [req.params.id, req.usuario.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Busca não encontrada' });
+
+    const job = rows[0];
+    const segundos = Math.round((Date.now() - new Date(job.criado_em).getTime()) / 1000);
+
+    if (job.estado === 'pronto') {
+      return res.json({
+        estado: 'pronto',
+        anuncios: job.resultado ? JSON.parse(job.resultado) : [],
+        do_cache: false,
+        buscado_em: job.terminado_em,
+        segundos,
+      });
+    }
+    if (job.estado === 'erro') {
+      return res.json({
+        estado: 'erro',
+        erro: 'A busca não conseguiu terminar desta vez e não foi descontada da sua cota. Tente de novo; se repetir, afrouxe algum filtro.',
+        segundos,
+      });
+    }
+    res.json({ estado: 'rodando', segundos, estimativa: await estimativaDeBusca() });
+  } catch (error) { falhou(res, 'andamento da busca', error); }
+});
+
 app.post('/api/buscar-anuncios', autenticar, exigirAssinatura, async (req, res) => {
   try {
     const entrada = { ...req.query, ...req.body };
     const criterios = somenteCriterios(entrada);
-    if (!criterios.bairro) return res.status(400).json({ erro: 'Informe o bairro para buscar' });
+
+    // Busca por frase preenche os filtros que der para ler com segurança.
+    if (criterios.consulta) {
+      const lidos = interpretarConsulta(criterios.consulta);
+      Object.entries(lidos).forEach(([campo, valor]) => {
+        if (!criterios[campo]) criterios[campo] = valor;
+      });
+    }
+
+    if (!criterios.bairro && !criterios.consulta) {
+      return res.status(400).json({ erro: 'Escreva o que você procura, ou informe ao menos o bairro.' });
+    }
 
     const chave = chaveDaBusca(criterios);
     const forcar = entrada.forcar;
@@ -1492,9 +1724,14 @@ app.post('/api/buscar-anuncios', autenticar, exigirAssinatura, async (req, res) 
     if (!ignorarCache) {
       const salvo = await lerDoCache(chave);
       if (salvo) {
-        console.log(`Cache HIT ${chave.slice(0, 8)} (${criterios.bairro}), nenhuma chamada de IA`);
+        console.log(`Cache HIT ${chave.slice(0, 8)}, nenhuma chamada de IA`);
         await registrarHistorico(req.usuario.id, criterios, salvo.anuncios.length);
-        return res.json({ anuncios: salvo.anuncios, do_cache: true, buscado_em: salvo.buscado_em });
+        return res.json({
+          estado: 'pronto',
+          anuncios: salvo.anuncios,
+          do_cache: true,
+          buscado_em: salvo.buscado_em,
+        });
       }
     }
 
@@ -1506,15 +1743,28 @@ app.post('/api/buscar-anuncios', autenticar, exigirAssinatura, async (req, res) 
       });
     }
 
-    console.log(`Cache MISS ${chave.slice(0, 8)} (${criterios.bairro}), consultando a IA`);
-    const anuncios = await consultarPortais(criterios);
+    const jobId = crypto.randomBytes(16).toString('hex');
+    await pool.query(
+      'INSERT INTO buscas_job (id, conta_id, usuario_id, chave, criterios) VALUES (?, ?, ?, ?, ?)',
+      [jobId, req.conta.id, req.usuario.id, chave, JSON.stringify(criterios)]
+    );
 
-    // só vale guardar busca que achou alguma coisa
-    if (anuncios.length > 0) await gravarNoCache(chave, criterios, anuncios);
-    await registrarHistorico(req.usuario.id, criterios, anuncios.length);
+    // Dispara e não espera: a resposta sai agora, o trabalho continua.
+    rodarJob(jobId, criterios, req.conta.id, req.usuario.id);
 
-    res.json({ anuncios, do_cache: false, buscado_em: new Date() });
-  } catch (error) { falhou(res, 'buscar anuncios', error); }
+    // Manda junto o resultado antigo, se existir, para a tela já mostrar algo.
+    const vencido = await lerCacheVencido(chave);
+
+    console.log(`Job ${jobId.slice(0, 8)} iniciado (${criterios.consulta || criterios.bairro})`);
+    return res.status(202).json({
+      estado: 'rodando',
+      busca_id: jobId,
+      estimativa: await estimativaDeBusca(),
+      anuncios_anteriores: vencido ? vencido.anuncios : [],
+      anteriores_de: vencido ? vencido.buscado_em : null,
+      criterios_lidos: criterios,
+    });
+  } catch (error) { falhou(res, 'iniciar busca', error); }
 });
 
 // ============ BUSCA AGENDADA (ALERTAS) ============
@@ -1546,7 +1796,9 @@ app.post('/api/alertas', autenticar, async (req, res) => {
   try {
     const { nome, criterios, hora } = req.body;
     const limpos = somenteCriterios(criterios || {});
-    if (!limpos.bairro) return res.status(400).json({ erro: 'O alerta precisa pelo menos do bairro.' });
+    if (!limpos.bairro && !limpos.consulta) {
+      return res.status(400).json({ erro: 'O alerta precisa do que você procura, ou ao menos do bairro.' });
+    }
 
     const [contagem] = await pool.query(
       `SELECT COUNT(*) AS total FROM alertas a
@@ -1560,7 +1812,9 @@ app.post('/api/alertas', autenticar, async (req, res) => {
       });
     }
 
-    const nomeFinal = String(nome || '').trim() || `${limpos.bairro}${limpos.cidade ? ', ' + limpos.cidade : ''}`;
+    const nomeFinal = String(nome || '').trim()
+      || limpos.consulta
+      || `${limpos.bairro}${limpos.cidade ? ', ' + limpos.cidade : ''}`;
 
     const [result] = await pool.query(
       'INSERT INTO alertas (usuario_id, nome, criterios, hora, ativo) VALUES (?, ?, ?, ?, TRUE)',
@@ -1613,6 +1867,7 @@ app.post('/api/alertas/:id/rodar', autenticar, exigirAssinatura, async (req, res
     }
 
     const atualizado = await rodarAlerta(rows[0]);
+    if (atualizado && atualizado.erro) await devolverCota(req.conta.id, 'buscas');
     res.json(alertaParaJson(atualizado));
   } catch (error) { falhou(res, 'rodar alerta', error); }
 });
@@ -1716,7 +1971,8 @@ async function processarAlertas() {
         ]);
         continue;
       }
-      await rodarAlerta(alerta, true);
+      const resultado = await rodarAlerta(alerta, true);
+      if (resultado && resultado.erro) await devolverCota(conta.id, 'buscas');
     }
   } catch (error) {
     console.error('Falha ao processar alertas:', error.message);
