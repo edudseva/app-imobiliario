@@ -1245,7 +1245,10 @@ function App() {
           <>
             <section className="painel">
               <h2>O que você está procurando?</h2>
-              <p className="ajuda">Só o bairro é obrigatório. Quanto mais campos preencher, mais precisa fica a busca.</p>
+              <p className="ajuda">
+                Escreva do seu jeito, como falaria com um colega. Quanto mais detalhe,
+                melhor o resultado. Se preferir preencher campo a campo, use Mais filtros.
+              </p>
 
               <form onSubmit={(e) => { e.preventDefault(); executarBusca(false); }}>
                 <div className="seletor-negocio" role="radiogroup" aria-label="Finalidade">
