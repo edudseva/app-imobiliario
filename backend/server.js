@@ -1645,6 +1645,29 @@ async function estimativaDeBusca() {
   return estimativaCache.valor;
 }
 
+// Mensagem de falha que diz a verdade. Mandar "afrouxe o filtro" quando o
+// problema é saldo da API faz a pessoa perder tempo no lugar errado.
+function mensagemDeFalhaBusca(error) {
+  const texto = String((error && error.message) || '');
+
+  if (/credit balance is too low|insufficient.*credit/i.test(texto)) {
+    return 'A conta da API ficou sem crédito. Recarregue em console.anthropic.com e tente de novo. Sua cota não foi descontada.';
+  }
+  if (/invalid x-api-key|authentication_error|api key/i.test(texto)) {
+    return 'A chave da API não foi aceita pelo servidor. Confira a variável CLAUDE_API_KEY. Sua cota não foi descontada.';
+  }
+  if (/rate_limit|429|overloaded/i.test(texto)) {
+    return 'A API está sobrecarregada neste momento. Espere um minuto e tente de novo. Sua cota não foi descontada.';
+  }
+  if (/timeout|timed out|aborted|prazo/i.test(texto)) {
+    return 'A busca passou do tempo limite. Tente afrouxar algum filtro ou ampliar a faixa de preço. Sua cota não foi descontada.';
+  }
+  if (/JSON|malformada|vazia/i.test(texto)) {
+    return 'A busca voltou com uma resposta que não consegui ler. Tente de novo. Sua cota não foi descontada.';
+  }
+  return 'A busca não conseguiu terminar desta vez e não foi descontada da sua cota. Tente de novo; se repetir, afrouxe algum filtro.';
+}
+
 // Roda a busca fora da requisição e guarda o resultado no job.
 async function rodarJob(jobId, criterios, contaId, usuarioId) {
   const chave = chaveDaBusca(criterios);
@@ -1662,7 +1685,7 @@ async function rodarJob(jobId, criterios, contaId, usuarioId) {
     console.error(`Job ${jobId.slice(0, 8)} falhou:`, erroBusca.message);
     await pool.query(
       "UPDATE buscas_job SET estado = 'erro', erro = ?, terminado_em = NOW() WHERE id = ?",
-      [String(erroBusca.message || 'falhou').slice(0, 300), jobId]
+      [mensagemDeFalhaBusca(erroBusca).slice(0, 300), jobId]
     );
   }
 }
@@ -1691,7 +1714,7 @@ app.get('/api/buscar-anuncios/:id', autenticar, async (req, res) => {
     if (job.estado === 'erro') {
       return res.json({
         estado: 'erro',
-        erro: 'A busca não conseguiu terminar desta vez e não foi descontada da sua cota. Tente de novo; se repetir, afrouxe algum filtro.',
+        erro: job.erro || 'A busca não conseguiu terminar desta vez e não foi descontada da sua cota.',
         segundos,
       });
     }
@@ -1929,7 +1952,7 @@ async function rodarAlerta(alerta, notificar = false) {
   } catch (error) {
     console.error(`Alerta ${alerta.id} falhou:`, error.message);
     await pool.query('UPDATE alertas SET ultima_execucao = NOW(), erro = ? WHERE id = ?', [
-      String(error.message).slice(0, 300),
+      mensagemDeFalhaBusca(error).slice(0, 300),
       alerta.id,
     ]);
   }
