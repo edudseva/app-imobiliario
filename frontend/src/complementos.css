@@ -1,6 +1,39 @@
 /* Telas de login, favoritos, situação do contato e buscas recentes.
    Usa os tokens definidos no App.css. */
 
+/* "Mais filtros" abre o resto da busca: merece a cor de ação, não o cinza
+   de texto secundário. */
+.alternar-filtros {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--acento);
+  border-radius: var(--pilula);
+  padding-left: 12px;
+  padding-right: 12px;
+  transition: color var(--rapido) var(--curva),
+              background var(--rapido) var(--curva),
+              transform var(--rapido) var(--curva);
+}
+
+@media (hover: hover) {
+  .alternar-filtros:hover {
+    color: #86c3ef;
+    background: var(--acento-fraco);
+  }
+}
+
+.alternar-filtros:active {
+  color: #a8d6f5;
+  background: var(--acento-fraco);
+  transform: scale(0.97);
+}
+
+.alternar-filtros:focus-visible {
+  outline: none;
+  box-shadow: var(--foco);
+}
+
 /* ===== Login ===== */
 
 .tela-login {
