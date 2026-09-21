@@ -197,13 +197,46 @@ body {
 .alerta {
   max-width: 1100px;
   margin: 14px auto 0;
-  padding: 13px 18px;
+  padding: 13px 10px 13px 18px;
   border-radius: var(--raio);
   font-size: 14px;
   line-height: 1.5;
   border-left: 3px solid transparent;
   box-shadow: var(--sombra-1);
   animation: surgir 0.25s var(--curva);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.alerta > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.alerta-fechar {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--pilula);
+  color: inherit;
+  opacity: 0.6;
+  font-family: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  transition: opacity var(--rapido), background var(--rapido);
+}
+
+.alerta-fechar:hover,
+.alerta-fechar:active {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 @keyframes surgir {
