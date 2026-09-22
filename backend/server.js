@@ -1169,34 +1169,71 @@ Responda APENAS com um bloco JSON (sem texto antes ou depois, sem markdown):
     },
   ];
 
-  // A API roda as ferramentas num loop interno com limite de iterações.
-  // Busca difícil (poucos anúncios que batem) estoura esse limite e volta
-  // com stop_reason "pause_turn": o trabalho não acabou, precisa continuar.
+  // Cache de prompt. Sem ele, cada continuacao reprocessava do zero tudo que
+  // ja tinha sido baixado (ate 60 mil tokens de pagina), e essa releitura era
+  // a maior parte da conta. Com o marcador ligado, as ferramentas de servidor
+  // gravam cache sozinhas depois dos resultados delas, e a leitura sai por 10%
+  // do preco de entrada.
+  const conteudoUsuario = [
+    { type: 'text', text: prompt, cache_control: { type: 'ephemeral' } },
+  ];
+
+  // A API roda as ferramentas num loop interno com limite de iteracoes.
+  // Busca dificil (poucos anuncios que batem) estoura esse limite e volta
+  // com stop_reason "pause_turn": o trabalho nao acabou, precisa continuar.
   const MAX_CONTINUACOES = 2;
   const comecou = Date.now();
   const passouDoPrazo = () => Date.now() - comecou > PRAZO_BUSCA;
+
+  // Custo medido, nao estimado: soma o uso de todas as chamadas da busca.
+  const gasto = { entrada: 0, saida: 0, escrito: 0, lido: 0, buscas: 0 };
+  const somarUso = (uso) => {
+    if (!uso) return;
+    gasto.entrada += uso.input_tokens || 0;
+    gasto.saida += uso.output_tokens || 0;
+    gasto.escrito += uso.cache_creation_input_tokens || 0;
+    gasto.lido += uso.cache_read_input_tokens || 0;
+    gasto.buscas += (uso.server_tool_use && uso.server_tool_use.web_search_requests) || 0;
+  };
 
   let message = await client.messages.create({
     model: 'claude-sonnet-5',
     max_tokens: 16000,
     tools: ferramentas,
-    messages: [{ role: 'user', content: prompt }],
+    messages: [{ role: 'user', content: conteudoUsuario }],
   });
+  somarUso(message.usage);
 
+  // O acumulado importa duas vezes: sem ele a continuacao seguinte perdia tudo
+  // que a anterior tinha achado, e o prefixo mudava a cada volta, o que anula
+  // o cache.
+  let conteudoAssistente = [];
   let continuacoes = 0;
   while (message.stop_reason === 'pause_turn' && continuacoes < MAX_CONTINUACOES && !passouDoPrazo()) {
     continuacoes += 1;
     console.log(`Busca ${bairro}: pause_turn, continuando (${continuacoes}/${MAX_CONTINUACOES})`);
+    conteudoAssistente = conteudoAssistente.concat(message.content);
     message = await client.messages.create({
       model: 'claude-sonnet-5',
       max_tokens: 16000,
       tools: ferramentas,
       messages: [
-        { role: 'user', content: prompt },
-        { role: 'assistant', content: message.content },
+        { role: 'user', content: conteudoUsuario },
+        { role: 'assistant', content: conteudoAssistente },
       ],
     });
+    somarUso(message.usage);
   }
+
+  // Preco do Sonnet 5 por milhao de tokens, em dolar: entrada 2, saida 10,
+  // escrita de cache 2,50, leitura de cache 0,20. Busca web a 10 por mil.
+  // Se 'cache lido' vier zerado em buscas que continuaram, o cache nao pegou.
+  const custoUS =
+    (gasto.entrada * 2 + gasto.saida * 10 + gasto.escrito * 2.5 + gasto.lido * 0.2) / 1e6 +
+    gasto.buscas * 0.01;
+  console.log(
+    `Busca ${bairro}: custo US$ ${custoUS.toFixed(4)} | entrada ${gasto.entrada} | saida ${gasto.saida} | cache escrito ${gasto.escrito} | cache lido ${gasto.lido} | buscas ${gasto.buscas}`
+  );
 
   const segundos = Math.round((Date.now() - comecou) / 1000);
   console.log(`Busca ${bairro}: stop_reason=${message.stop_reason}, continuacoes=${continuacoes}, ${segundos}s`);
